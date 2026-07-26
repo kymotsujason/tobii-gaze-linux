@@ -8,3 +8,4 @@ traces/*
 result
 __pycache__/
 *.pyc
+skin/

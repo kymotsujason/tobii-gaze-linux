@@ -5,8 +5,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 V="$ROOT/vendor/tobiifree"
 
-git -C "$V" checkout -- . 2>/dev/null || true
-git -C "$V" clean -fd 2>/dev/null || true
+if [ ! -e "$V/.git" ]; then
+  echo "vendor/tobiifree is not initialised; run: git submodule update --init --recursive" >&2
+  exit 1
+fi
+
+git -C "$V" reset --hard HEAD
+git -C "$V" clean -fdx
 
 shopt -s nullglob
 for p in "$ROOT"/patches/*.patch; do
