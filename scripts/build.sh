@@ -10,7 +10,18 @@ if [ ! -e "$V/.git" ]; then
   exit 1
 fi
 
-git -C "$V" reset --hard HEAD
+PIN="$(git -C "$ROOT" rev-parse :vendor/tobiifree)"
+RECORDED="$(cat "$ROOT/vendor/PINNED_COMMIT")"
+if [ "$PIN" != "$RECORDED" ]; then
+  echo "gitlink $PIN != vendor/PINNED_COMMIT $RECORDED; these must match" >&2
+  exit 1
+fi
+
+CUR="$(git -C "$V" rev-parse HEAD)"
+if [ "$CUR" != "$PIN" ]; then
+  echo "vendor/tobiifree HEAD $CUR != pinned $PIN; resetting to the pin" >&2
+fi
+git -C "$V" reset --hard "$PIN"
 git -C "$V" clean -fd
 
 shopt -s nullglob
