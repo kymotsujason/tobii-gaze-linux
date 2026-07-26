@@ -10,18 +10,18 @@ if [ ! -e "$V/.git" ]; then
   exit 1
 fi
 
-PIN="$(git -C "$ROOT" rev-parse :vendor/tobiifree)"
-RECORDED="$(cat "$ROOT/vendor/PINNED_COMMIT")"
-if [ "$PIN" != "$RECORDED" ]; then
-  echo "gitlink $PIN != vendor/PINNED_COMMIT $RECORDED; these must match" >&2
+PIN="$(git -C "$ROOT" rev-parse ":vendor/tobiifree")"
+if ! git -C "$V" cat-file -e "$PIN^{commit}" 2>/dev/null; then
+  echo "pinned commit $PIN is missing from vendor/tobiifree; run: git submodule update --init --recursive" >&2
   exit 1
 fi
-
-CUR="$(git -C "$V" rev-parse HEAD)"
-if [ "$CUR" != "$PIN" ]; then
-  echo "vendor/tobiifree HEAD $CUR != pinned $PIN; resetting to the pin" >&2
+if [ -f "$ROOT/vendor/PINNED_COMMIT" ] && [ "$(cat "$ROOT/vendor/PINNED_COMMIT")" != "$PIN" ]; then
+  echo "note: vendor/PINNED_COMMIT is stale (says $(cat "$ROOT/vendor/PINNED_COMMIT"), gitlink says $PIN)" >&2
 fi
-git -C "$V" reset --hard "$PIN"
+if [ "$(git -C "$V" rev-parse HEAD)" != "$PIN" ]; then
+  echo "vendor/tobiifree was at $(git -C "$V" rev-parse --short HEAD), resetting to pinned $PIN" >&2
+fi
+git -C "$V" checkout --force --detach "$PIN"
 git -C "$V" clean -fd
 
 shopt -s nullglob
