@@ -176,3 +176,34 @@ Task 4: IN FLIGHT, INCOMPLETE. patches/0006-calibration-buffers.patch written bu
 Task 3: still REOPENED. Critical fully specified in RESUME.md. Fix is sleep 15 -> 22
   plus an explicit handshake-incomplete branch, a trap for the temp log, and a bounded
   wait. Was queued behind Task 4.
+--- SESSION 3 START 2026-07-26 16:20 ---
+ENVIRONMENT BREAKAGE (not a plan task, controller-fixed, commit ae218b6):
+  ./scripts/build.sh segfaulted. Root cause found from the core dump, NOT ours:
+  today's 13:50 glibc upgrade (2.43+r37 -> 2.44+r3) made /usr/bin/nix die with
+  SIGSEGV in ELF constructors, before main. Stack: mimalloc _ZdaPv/free <-
+  __newlocale <- _S_create_c_locale <- ios_base::Init <- ld-linux. nix links
+  libmimalloc.so.3 (installed 02:41 with nix), which interposes malloc/free
+  process-wide; glibc 2.44 frees a pointer mimalloc never allocated.
+  PROOF: LD_PRELOAD=/usr/lib/libc.so.6 nix --version -> exit 0. Preloading
+  libstdc++ instead -> still 139, so it is the C allocator, not operator delete.
+  nix-daemon.service is also dead (systemctl: failed), so `nix develop` fails even
+  with the CLI preload -> full repair needs a systemd drop-in (sudo, user's call).
+  WORKAROUND SHIPPED: build.sh now probes `nix develop --command true` instead of
+  trusting `command -v nix`, and falls back to $ZIG / store zig 0.15.x / system zig.
+  SUBTLETY, cost one failed binary: a /nix/store zig stamps the STORE glibc as the
+  output's PT_INTERP, and that loader does not search /usr/lib. Building against
+  system libusb linked fine and then died at exec with "libusb-1.0.so.0: cannot
+  open shared object file". ldd hid it (ldd uses the system loader). So the
+  fallback pins PKG_CONFIG_PATH to the store libusb whenever zig is a store zig.
+  Also: `bash -c 'cmd'` execs in place, so redirecting could not hide bash's
+  "Segmentation fault" notice until `; exit $?` forced a fork.
+  VERIFIED: build.sh exit 0, warm rebuild, idempotent across runs, submodule ends
+  at d303e47 + 0006 staged; daemon binary runs and reaches handshake step 3;
+  check-device.sh PASS exit 0.
+  FLAGGED: build.sh is a Task 1 artifact changed outside the task loop. The final
+  whole-branch review must cover this diff.
+STALE BRIEFING CORRECTED: the handoff said Task 4's patch was quarantined at
+  docs/wip/task4-0006-...UNVERIFIED.patch.txt. It is not: commit 60b3ae3 renamed it
+  back to patches/0006-calibration-buffers.patch with a stronger bound (asserts
+  against core.scratch_size(), not buf.len). So Task 4 is IMPLEMENTED AND COMMITTED
+  but has NO REVIEW VERDICT. It needs review, not re-dispatch.

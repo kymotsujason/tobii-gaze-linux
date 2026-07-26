@@ -30,10 +30,43 @@ task-by-task implementation plan.
 ./scripts/build.sh
 ```
 
-Applies every patch under `patches/` to `vendor/tobiifree`, then runs `zig build` for
-`tobiifreed` inside the pinned `nix develop` shell (Zig 0.15.x). The resulting binary
-lands at `vendor/tobiifree/applications/tobiifreed/zig-out/bin/tobiifreed`.
+Clone with submodules, or run `git submodule update --init --recursive` first. The build
+resets `vendor/tobiifree` to the pinned commit, applies every patch under `patches/` in
+filename order, and then builds `tobiifreed`.
+
+The toolchain is Zig 0.15.x, which the build normally takes from `nix develop`. Zig 0.14
+and 0.16 both fail to compile this code, so the version is not negotiable. If `nix` is
+installed but not working, the build falls back to a Zig 0.15.x found in `/nix/store`, in
+`$ZIG`, or on `PATH`, and says which one it chose. The resulting binary lands at
+`vendor/tobiifree/applications/tobiifreed/zig-out/bin/tobiifreed`.
 
 ## Licensing
 
-`tobiifree` is GPL-3.0. Fine for a private build, relevant if this is ever published.
+This project is licensed under the **GNU General Public License v3.0**. The full text is
+in [LICENSE](LICENSE).
+
+The upstream driver, [tobiifree](https://github.com/Aetherall/tobiifree), is also
+GPL-3.0. It is vendored as a pinned git submodule and is never edited in place. Because
+every file under `patches/` contains excerpts of that GPL-3.0 source, both the changed
+lines and their surrounding context, those patches are derivative works and carry the
+same license. Licensing the whole repository GPL-3.0 keeps that boundary simple.
+
+### Changes made to tobiifree
+
+GPL-3.0 section 5(a) asks that modified files carry notice of the modification. The
+patch series is that notice. Each file below is applied to the pinned upstream checkout
+at build time and changes nothing in the upstream repository itself.
+
+| Patch | Upstream files touched | What it changes |
+|---|---|---|
+| `0006-calibration-buffers.patch` | `driver/src/tobiifree_core.zig`, `driver/src/tracker.zig`, `applications/tobiifreed/src/main.zig`, `applications/tobiifreed/src/server.zig` | Enlarges the calibration buffers and bounds the calibration blob against the 4096-byte scratch buffer. `session_out` was 512 bytes, which overflowed on any blob past roughly 478 bytes. |
+
+The series grows as Phase 1 proceeds, and the numbering is a valid application order
+rather than the order the work was done.
+
+### Not included here
+
+- `skin/` is third-party osu! art and audio. It is gitignored deliberately and is not
+  redistributable through this repository.
+- `traces/` holds recorded gaze traces, which are personal biometric data. Everything
+  except the README is gitignored.
