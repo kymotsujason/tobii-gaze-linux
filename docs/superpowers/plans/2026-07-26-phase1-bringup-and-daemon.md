@@ -1647,7 +1647,13 @@ inv = sum(1 for r in rows if r["validity_L"] != "0" or r["validity_R"] != "0")
 print("invalid samples: %.1f%%" % (100*inv/len(rows)))
 EOF
 ```
-Expected: median dt near 7.5 ms confirming 133 Hz, and an invalid fraction in the low single digits, most of it blinks. **A rate far from 133 Hz invalidates the `dt` assumptions in spec section 8** and must be recorded.
+Expected: **median dt near 30.3 ms, i.e. 33 Hz**, and an invalid fraction in the low single digits, most of it blinks.
+
+**This expectation was corrected during bring-up and is now measured, not assumed.** The plan originally said 7.5 ms / 133 Hz, taken from Tobii's marketing via a web search. The device actually delivers 33.2 Hz: `frame_counter` advances by exactly 4 on every sample (331 of 331 observed), dt clusters tightly at 30.27 ms with p10 29.85 and p90 30.55. The sensor counts at 133 Hz internally and ships every fourth frame. tobiifree's own `sdk/src/gusb.ts:99` says "~33Hz", so the code was right and the document was wrong.
+
+Setting the two `0x04` bytes in the 20-byte subscribe payload to `0x01` was tested as a possible decimation divisor and produced **zero frames**, so the rate is not trivially recoverable. Unlocking 133 Hz would require decoding that payload properly, of which only `stream_id` at bytes 9..10 is currently understood. Out of scope for Phase 1.
+
+Also measured during bring-up, for Task 16 and Plan 2: **per-eye L-R offset is 67 x 40 px** (78 px combined), against spec section 8's estimate of "up to 45 px". The monocular fusion EMA is more load-bearing than the spec describes.
 
 - [ ] **Step 4: Commit**
 
