@@ -1,0 +1,30 @@
+--- daemon log ---
+info(tobiifreed): display_area 1500x1000mm  origin=(-750,-500)  z=0  tilt=0.00
+info(usb): opened device 2104:0313
+debug(usb): claimed interface 0
+info(usb): session opened
+debug(tracker): handshake step 0: send 79 bytes
+debug(tracker): handshake step 1: send 34 bytes
+debug(tracker): handshake step 2: send 44 bytes
+debug(tracker): handshake step 3: send 52 bytes
+info(tracker): handshake complete in 4 steps
+info(tracker): device display: TL=(-750,500,0) TR=(750,500,0) BL=(-750,-500,0)
+info(tracker): connected, streaming gaze
+info(tobiifreed): device display area preserved from previous session
+info(server): listening on /run/user/1000/tobiifreed/gaze.sock
+info(tobiifreed): running
+info(tobiifreed): USB thread started
+debug(tobiifreed): gaze #1: vL=4 vR=4 x=-1.000 y=-1.000
+debug(tobiifreed): gaze #2: vL=4 vR=0 x=0.513 y=0.187
+debug(tobiifreed): gaze #3: vL=4 vR=0 x=0.511 y=0.190
+info(tobiifreed): shutting down
+info(tobiifreed): USB thread stopped
+info(server): socket removed
+info(tracker): deinit
+info(usb): session closed
+------------------
+PASS: gaze samples observed
+debug(tobiifreed): gaze #1: vL=4 vR=4 x=-1.000 y=-1.000
+debug(tobiifreed): gaze #2: vL=4 vR=0 x=0.513 y=0.187
+debug(tobiifreed): gaze #3: vL=4 vR=0 x=0.511 y=0.190
+OK: at least one eye detected in a logged sample
