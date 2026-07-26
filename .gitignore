@@ -1,0 +1,10 @@
+zig-out/
+zig-cache/
+.zig-cache/
+gaze-cal/build/
+traces/*
+!traces/README.md
+.superpowers/
+result
+__pycache__/
+*.pyc
