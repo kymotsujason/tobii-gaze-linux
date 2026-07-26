@@ -1,17 +1,23 @@
 diff --git a/applications/tobiifreed/src/main.zig b/applications/tobiifreed/src/main.zig
-index 0c3abcb..603c584 100644
+index 0c3abcb..cc86cc0 100644
 --- a/applications/tobiifreed/src/main.zig
 +++ b/applications/tobiifreed/src/main.zig
-@@ -241,7 +241,11 @@ fn sendResult(client_fd: std.posix.fd_t, cmd_type: u8, is_ws: bool, ok: bool, pa
+@@ -241,7 +241,17 @@ fn sendResult(client_fd: std.posix.fd_t, cmd_type: u8, is_ws: bool, ok: bool, pa
          }
          return;
      }
 -    var buf: [proto.HEADER_SIZE + 1 + 8192]u8 = undefined;
 +    var buf: [proto.HEADER_SIZE + 1 + 70000]u8 = undefined;
-+    if (payload.len + proto.HEADER_SIZE + 1 > buf.len) {
-+        log.err("response payload {d} exceeds buffer", .{payload.len});
++    // The only non-empty payload is a calibration blob living in out_scratch, so the
++    // semantic maximum is the scratch size, not buf.len. Assert the tighter bound:
++    // a longer payload means a bad cal_finish_blob_len, and since main.zig slices a
++    // many-pointer to build it, encodeResponse would read past out_scratch.
++    const max_payload = core.scratch_size();
++    if (payload.len > max_payload) {
++        log.err("response payload {d} exceeds maximum {d}", .{ payload.len, max_payload });
 +        return;
 +    }
++    std.debug.assert(max_payload + proto.HEADER_SIZE + 1 <= buf.len);
      const msg_len = proto.encodeResponse(&buf, cmd_type, payload);
      if (is_ws) {
          if (ws) |*w| w.sendToClient(client_fd, buf[0..msg_len]);
