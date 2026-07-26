@@ -11,7 +11,7 @@ if [ ! -e "$V/.git" ]; then
 fi
 
 git -C "$V" reset --hard HEAD
-git -C "$V" clean -fdx
+git -C "$V" clean -fd
 
 shopt -s nullglob
 for p in "$ROOT"/patches/*.patch; do
