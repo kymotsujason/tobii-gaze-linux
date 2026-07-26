@@ -1,0 +1,95 @@
+diff --git a/applications/tobiifreed/src/main.zig b/applications/tobiifreed/src/main.zig
+index 0c3abcb..603c584 100644
+--- a/applications/tobiifreed/src/main.zig
++++ b/applications/tobiifreed/src/main.zig
+@@ -241,7 +241,11 @@ fn sendResult(client_fd: std.posix.fd_t, cmd_type: u8, is_ws: bool, ok: bool, pa
+         }
+         return;
+     }
+-    var buf: [proto.HEADER_SIZE + 1 + 8192]u8 = undefined;
++    var buf: [proto.HEADER_SIZE + 1 + 70000]u8 = undefined;
++    if (payload.len + proto.HEADER_SIZE + 1 > buf.len) {
++        log.err("response payload {d} exceeds buffer", .{payload.len});
++        return;
++    }
+     const msg_len = proto.encodeResponse(&buf, cmd_type, payload);
+     if (is_ws) {
+         if (ws) |*w| w.sendToClient(client_fd, buf[0..msg_len]);
+diff --git a/applications/tobiifreed/src/server.zig b/applications/tobiifreed/src/server.zig
+index 9e92408..0272b3b 100644
+--- a/applications/tobiifreed/src/server.zig
++++ b/applications/tobiifreed/src/server.zig
+@@ -14,8 +14,9 @@ const MAX_CLIENTS = 16;
+ const Client = struct {
+     fd: std.posix.fd_t,
+     subscribed: bool,
+-    // Per-client read buffer for incoming commands.
+-    buf: [4096]u8,
++    // Per-client read buffer for incoming commands. Large enough for a
++    // cal_apply payload carrying a full calibration blob.
++    buf: [65536]u8,
+     buf_len: usize,
+ };
+ 
+@@ -100,7 +101,10 @@ pub const Server = struct {
+             const client = &(slot.* orelse continue);
+             const space = client.buf.len - client.buf_len;
+             if (space == 0) {
+-                client.buf_len = 0;
++                // Wiping the buffer here would silently drop a partial message,
++                // making an oversized command vanish with no error.
++                log.err("client message exceeds buffer, disconnecting", .{});
++                self.removeClient(slot);
+                 continue;
+             }
+             const n = std.posix.read(client.fd, client.buf[client.buf_len..]) catch |err| {
+diff --git a/driver/src/tobiifree_core.zig b/driver/src/tobiifree_core.zig
+index d3c2d3b..3dc27a6 100644
+--- a/driver/src/tobiifree_core.zig
++++ b/driver/src/tobiifree_core.zig
+@@ -1048,7 +1048,9 @@ var next_req_id: u32 = 1;
+ 
+ // Dedicated out buffer so request_* returns only a length; JS copies it
+ // via take_session_out (or reads directly at session_out_ptr).
+-var session_out: [512]u8 = undefined;
++// Sized to hold the largest calibration frame: a 4096-byte blob (out_scratch.len)
++// plus 34 bytes of envelope, TTP header and 2-byte payload prefix.
++var session_out: [8192]u8 = undefined;
+ var session_out_len: usize = 0;
+ 
+ fn pendingInsert(seq: u32, req_id: u32) void {
+@@ -2496,3 +2498,17 @@ test "parse fragmented multi-envelope response" {
+     try std.testing.expectEqual(@as(usize, 0), test_error_count);
+     try std.testing.expectEqual(@as(usize, 0), acc_len);
+ }
++
++test "session_out can hold a maximum calibration blob" {
++    const MAX_BLOB: usize = 4096;
++    const TTP_OVERHEAD: usize = 34; // envelope + header + 2-byte prefix
++    try std.testing.expect(session_out.len >= MAX_BLOB + TTP_OVERHEAD);
++}
++
++// Couples the two buffers so growing out_scratch without growing session_out fails,
++// and derives the 34-byte overhead rather than trusting the literal above.
++test "session_out fits a frame built from a full scratch buffer" {
++    const TTP_OVERHEAD: usize = ENVELOPE_SIZE + TTP_HDR_SIZE + 2;
++    try std.testing.expectEqual(@as(usize, 34), TTP_OVERHEAD);
++    try std.testing.expect(session_out.len >= scratch_size() + TTP_OVERHEAD);
++}
+diff --git a/driver/src/tracker.zig b/driver/src/tracker.zig
+index 810e25b..c1616a5 100644
+--- a/driver/src/tracker.zig
++++ b/driver/src/tracker.zig
+@@ -235,6 +235,12 @@ pub const Tracker = struct {
+     }
+ 
+     pub fn calApply(self: *Tracker, blob: []const u8) bool {
++        // scratch_ptr is a many-pointer, so slicing it is unchecked even in
++        // ReleaseSafe. The blob arrives from a socket client, so bound it here.
++        if (blob.len > core.scratch_size()) {
++            log.err("cal_apply blob {d} exceeds scratch {d}", .{ blob.len, core.scratch_size() });
++            return false;
++        }
+         const scratch = core.scratch_ptr();
+         @memcpy(scratch[0..blob.len], blob);
+         core.cal_apply_init(@intCast(blob.len));
