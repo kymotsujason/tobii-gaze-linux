@@ -1,5 +1,5 @@
 diff --git a/applications/tobiifreed/src/main.zig b/applications/tobiifreed/src/main.zig
-index 504e01b..b1c0bd4 100644
+index 504e01b..65c8d69 100644
 --- a/applications/tobiifreed/src/main.zig
 +++ b/applications/tobiifreed/src/main.zig
 @@ -166,7 +166,8 @@ fn onResponse(request_id: u32, payload_ptr: [*]const u8, payload_len: u32) void
@@ -12,7 +12,7 @@ index 504e01b..b1c0bd4 100644
      }
  
      log.debug("routed response for cmd=0x{x:0>2} to fd={}", .{ entry.cmd_type, entry.client_fd });
-@@ -186,8 +187,22 @@ fn forwardCommand(client_fd: std.posix.fd_t, cmd_type: u8, payload: []const u8,
+@@ -186,8 +187,25 @@ fn forwardCommand(client_fd: std.posix.fd_t, cmd_type: u8, payload: []const u8,
          .subscribe, .disconnect => return, // handled locally, not forwarded
          else => {},
      }
@@ -31,22 +31,43 @@ index 504e01b..b1c0bd4 100644
 +        // reply, which the client cannot detect. Both are refused: an error the
 +        // caller can retry beats a wrong answer it will trust.
 +        log.err("refusing cmd=0x{x:0>2}: USB thread not parked", .{cmd_type});
-+        sendResult(client_fd, cmd_type, is_ws, false, &.{});
++        // Its own code: nothing reached the device, so unlike proto.Err.failed
++        // this one is worth retrying, and the frame carries nothing else to
++        // tell the two apart.
++        sendError(client_fd, is_ws, .usb_busy);
 +        return;
 +    }
  
      switch (cmd) {
          .subscribe, .disconnect => return, // unreachable, filtered above
-@@ -276,7 +291,7 @@ fn sendResult(client_fd: std.posix.fd_t, cmd_type: u8, is_ws: bool, ok: bool, pa
-         if (is_ws) {
-             if (ws) |*w| w.sendToClient(client_fd, &err_buf);
-         } else {
+@@ -269,15 +287,19 @@ fn buildRequest(cmd: proto.Cmd, payload: []const u8) ?u32 {
+     };
+ }
+ 
++fn sendError(client_fd: std.posix.fd_t, is_ws: bool, code: proto.Err) void {
++    var err_buf: [proto.HEADER_SIZE + 4]u8 = undefined;
++    proto.encodeError(&err_buf, @intFromEnum(code));
++    if (is_ws) {
++        if (ws) |*w| w.sendToClient(client_fd, &err_buf);
++    } else {
++        server.sendToClient(client_fd, &err_buf);
++    }
++}
++
+ fn sendResult(client_fd: std.posix.fd_t, cmd_type: u8, is_ws: bool, ok: bool, payload: []const u8) void {
+     if (!ok) {
+-        var err_buf: [proto.HEADER_SIZE + 4]u8 = undefined;
+-        proto.encodeError(&err_buf, 0x01);
+-        if (is_ws) {
+-            if (ws) |*w| w.sendToClient(client_fd, &err_buf);
+-        } else {
 -            _ = std.posix.write(client_fd, &err_buf) catch {};
-+            server.sendToClient(client_fd, &err_buf);
-         }
+-        }
++        sendError(client_fd, is_ws, .failed);
          return;
      }
-@@ -296,7 +311,7 @@ fn sendResult(client_fd: std.posix.fd_t, cmd_type: u8, is_ws: bool, ok: bool, pa
+     // Sized by what the daemon can emit, not by what a client can send: the only
+@@ -296,7 +318,7 @@ fn sendResult(client_fd: std.posix.fd_t, cmd_type: u8, is_ws: bool, ok: bool, pa
      if (is_ws) {
          if (ws) |*w| w.sendToClient(client_fd, buf[0..msg_len]);
      } else {
@@ -55,7 +76,16 @@ index 504e01b..b1c0bd4 100644
      }
  }
  
-@@ -534,6 +549,10 @@ pub fn main() void {
+@@ -492,7 +514,7 @@ pub fn main() void {
+     core.set_hooks(null, null, onResponse, null, null);
+ 
+     // Start socket server.
+-    server = Server.init(&forwardCommand) catch |err| {
++    Server.init(&server, &forwardCommand) catch |err| {
+         log.err("failed to start server: {}", .{err});
+         return;
+     };
+@@ -534,6 +556,10 @@ pub fn main() void {
          // Service client connections.
          server.acceptClients();
          server.readCommands();
@@ -66,7 +96,7 @@ index 504e01b..b1c0bd4 100644
          if (ws) |*w| {
              w.acceptClients();
              w.readClients();
-@@ -632,8 +651,9 @@ fn usbThreadFn() void {
+@@ -632,8 +658,9 @@ fn usbThreadFn() void {
      log.info("USB thread stopped", .{});
  }
  
@@ -78,7 +108,7 @@ index 504e01b..b1c0bd4 100644
  ///
  /// The first loop is what makes back-to-back commands survivable. usbResume
  /// only clears the request flag, so a command issued within the USB thread's
-@@ -647,25 +667,31 @@ fn usbThreadFn() void {
+@@ -647,25 +674,31 @@ fn usbThreadFn() void {
  /// turn and guarantees usb_paused was cleared, so the ack below is fresh.
  ///
  /// Each wait is budgeted at 5000 x 0.2ms = 1s, against a worst-case poll() of
@@ -119,7 +149,7 @@ index 504e01b..b1c0bd4 100644
  
      usb_pause_req.store(true, .release);
      var spins: u32 = 0;
-@@ -674,12 +700,27 @@ fn usbPause() void {
+@@ -674,12 +707,27 @@ fn usbPause() void {
      {
          std.Thread.sleep(200_000);
      }
@@ -152,7 +182,7 @@ index 504e01b..b1c0bd4 100644
  
  // ── Transport bridge ────────────────────────────────────────────────
 diff --git a/applications/tobiifreed/src/server.zig b/applications/tobiifreed/src/server.zig
-index 0272b3b..d071dce 100644
+index 0272b3b..ec9f4e4 100644
 --- a/applications/tobiifreed/src/server.zig
 +++ b/applications/tobiifreed/src/server.zig
 @@ -18,6 +18,14 @@ const Client = struct {
@@ -170,7 +200,7 @@ index 0272b3b..d071dce 100644
  };
  
  pub const ForwardFn = *const fn (client_fd: std.posix.fd_t, cmd_type: u8, payload: []const u8, is_ws: bool) void;
-@@ -29,6 +37,12 @@ pub const Server = struct {
+@@ -29,8 +37,18 @@ pub const Server = struct {
      socket_path: [512]u8,
      socket_path_len: usize,
      forward_fn: ForwardFn,
@@ -181,18 +211,42 @@ index 0272b3b..d071dce 100644
 +    // the USB thread for up to a second and would otherwise stall it here.
 +    lock: std.Thread.Mutex,
  
-     pub fn init(forward_fn: ForwardFn) !Server {
+-    pub fn init(forward_fn: ForwardFn) !Server {
++    /// Fills `self` in place. Returning a Server by value instead put two
++    /// 3.1 MB copies of it on main's stack, one for init's local and one for
++    /// the return slot, before the third copy into the global. That reserved
++    /// 6.0 MiB of an 8 MiB stack for a struct that lives in .bss.
++    pub fn init(self: *Server, forward_fn: ForwardFn) !void {
          var path_buf: [512]u8 = undefined;
-@@ -60,6 +74,8 @@ pub const Server = struct {
-             .socket_path = undefined,
-             .socket_path_len = path.len,
-             .forward_fn = forward_fn,
-+            .dropped = 0,
-+            .lock = .{},
-         };
+         const path = proto.socketPath(&path_buf) orelse return error.NoSocketPath;
+ 
+@@ -53,22 +71,25 @@ pub const Server = struct {
+         try std.posix.bind(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un));
+         try std.posix.listen(fd, 8);
+ 
+-        var self = Server{
+-            .listen_fd = fd,
+-            .clients = [_]?Client{null} ** MAX_CLIENTS,
+-            .n_clients = 0,
+-            .socket_path = undefined,
+-            .socket_path_len = path.len,
+-            .forward_fn = forward_fn,
+-        };
++        // Field by field, not `self.* = Server{...}`: a struct literal of this
++        // size can be materialised before it is stored, which is the copy this
++        // signature exists to avoid. The slot loop only writes optional tags.
++        self.listen_fd = fd;
++        for (&self.clients) |*slot| slot.* = null;
++        self.n_clients = 0;
++        self.socket_path_len = path.len;
++        self.forward_fn = forward_fn;
++        self.dropped = 0;
++        self.lock = .{};
          @memcpy(self.socket_path[0..path.len], path);
  
-@@ -69,6 +85,8 @@ pub const Server = struct {
+         log.info("listening on {s}", .{path});
+-        return self;
+     }
  
      /// Accept new clients (non-blocking).
      pub fn acceptClients(self: *Server) void {
@@ -201,7 +255,7 @@ index 0272b3b..d071dce 100644
          while (true) {
              const fd = std.posix.accept(self.listen_fd, null, null, std.posix.SOCK.NONBLOCK) catch break;
  
-@@ -81,6 +99,9 @@ pub const Server = struct {
+@@ -81,6 +102,9 @@ pub const Server = struct {
                          .subscribed = false,
                          .buf = undefined,
                          .buf_len = 0,
@@ -211,7 +265,7 @@ index 0272b3b..d071dce 100644
                      };
                      self.n_clients += 1;
                      placed = true;
-@@ -98,6 +119,8 @@ pub const Server = struct {
+@@ -98,6 +122,8 @@ pub const Server = struct {
      /// Read and dispatch commands from all clients.
      pub fn readCommands(self: *Server) void {
          for (&self.clients) |*slot| {
@@ -220,7 +274,7 @@ index 0272b3b..d071dce 100644
              const client = &(slot.* orelse continue);
              const space = client.buf.len - client.buf_len;
              if (space == 0) {
-@@ -122,14 +145,26 @@ pub const Server = struct {
+@@ -122,14 +148,31 @@ pub const Server = struct {
  
              // Process complete messages.
              var pos: usize = 0;
@@ -230,8 +284,13 @@ index 0272b3b..d071dce 100644
                  const msg_end = pos + proto.HEADER_SIZE + hdr.payload_len;
                  if (msg_end > client.buf_len) break;
  
-+                // Dispatch parks the USB thread for the whole command, so the
-+                // lock cannot be held across it. Nothing else reads buf.
++                // This unlock is what keeps the daemon from deadlocking, not a
++                // scope tidy-up. Dispatch runs usbPause, which waits up to a
++                // second for the USB thread to acknowledge. That thread reaches
++                // onResponse -> sendToClient, which takes this lock. Held here,
++                // the USB thread blocks, never acknowledges, and the main
++                // thread waits out both budgets on every command. Nothing else
++                // reads buf, so dropping the lock costs nothing.
 +                self.lock.unlock();
                  self.dispatchCmd(client, hdr.msg_type, client.buf[pos + proto.HEADER_SIZE .. msg_end]);
 +                self.lock.lock();
@@ -247,7 +306,20 @@ index 0272b3b..d071dce 100644
  
              // Shift remaining.
              if (pos > 0) {
-@@ -155,20 +190,106 @@ pub const Server = struct {
+@@ -144,6 +187,12 @@ pub const Server = struct {
+ 
+     fn dispatchCmd(self: *Server, client: *Client, msg_type: u8, payload: []const u8) void {
+         if (msg_type == @intFromEnum(proto.Cmd.subscribe)) {
++            // Written with the lock released, since readCommands drops it
++            // around this call. Safe only because subscribed has exactly one
++            // writer and one reader and both are the main thread: this line
++            // and broadcastGaze. It is the one Client field the lock does not
++            // cover, so moving the subscribe decision anywhere else, or reading
++            // subscribed from onResponse, needs the lock taken here first.
+             client.subscribed = true;
+             log.info("client subscribed to gaze", .{});
+             return;
+@@ -155,20 +204,106 @@ pub const Server = struct {
          self.forward_fn(client.fd, msg_type, payload, false);
      }
  
@@ -357,7 +429,7 @@ index 0272b3b..d071dce 100644
      fn removeClient(self: *Server, slot: *?Client) void {
          if (slot.*) |client| {
              std.posix.close(client.fd);
-@@ -179,6 +300,8 @@ pub const Server = struct {
+@@ -179,6 +314,8 @@ pub const Server = struct {
      }
  
      pub fn deinit(self: *Server) void {
@@ -366,3 +438,30 @@ index 0272b3b..d071dce 100644
          // Close all clients.
          for (&self.clients) |*slot| {
              if (slot.*) |client| {
+diff --git a/driver/src/daemon_protocol.zig b/driver/src/daemon_protocol.zig
+index 2cb245e..d54fea1 100644
+--- a/driver/src/daemon_protocol.zig
++++ b/driver/src/daemon_protocol.zig
+@@ -41,6 +41,22 @@ pub const Cmd = enum(u8) {
+     disconnect = 0xFF,
+ };
+ 
++// -- Error codes -----------------------------------------------------
++//
++// The u32 payload of an err (0xFF) frame. Distinct values matter because the
++// frame carries nothing else a client can act on.
++
++pub const Err = enum(u32) {
++    /// The command was attempted and did not succeed: a malformed payload, a
++    /// USB send failure, or a state machine that reported an error. Retrying
++    /// the same request unchanged is unlikely to help.
++    failed = 1,
++    /// The daemon could not park its USB thread, so it refused the command
++    /// rather than run it against a shared endpoint and a shared parser
++    /// accumulator. Nothing was sent to the device. Retryable.
++    usb_busy = 2,
++};
++
+ // ── Encode helpers ──────────────────────────────────────────────────
+ 
+ pub fn encodeHeader(buf: *[HEADER_SIZE]u8, msg_type: u8, payload_len: u32) void {
