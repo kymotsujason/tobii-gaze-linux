@@ -58,7 +58,8 @@ A file survives a lost message.
 | 2. udev scripts | complete (`c7d1cf5`, `1fdb7a4`) |
 | 3. Bring-up spike | complete (`ae218b6..19e5a6f`, review clean) |
 | 4. P7 calibration buffers | complete (`60b3ae3..8de095d`, review clean) |
-| 5-9. Remaining daemon patches | not started, briefs staged |
+| 5. P4 force the display area | complete (`b029663`, review clean) |
+| 6-9. Remaining daemon patches | not started, briefs staged |
 | 10-12. `gaze-cal` protocol, client, display gate | not started, briefs staged |
 | 13-16. Calibration, systemd, trace, refit | not started, 13 and 15 need the human |
 
@@ -140,7 +141,9 @@ All of these were assumptions that measurement disproved. Do not re-derive them.
 - Display area persists on-device across daemon restarts, confirmed by readback rather
   than inference: a no-flag restart reports `device display: TL=(-299,346,0)
   TR=(299,346,0) BL=(-299,10,0)`, which is 598 x 336 mm. Persistence across a device
-  power cycle is NOT proven, and `isReset()` exists because it does not always hold
+  power cycle is NOT proven, and `isReset()` exists because it does not always hold. Those
+  corners are 597 x 336 mm, printed rounded to whole millimetres from 298.5 per side. A
+  `{d:.3}` readback during Task 5 gave 597.000 x 336.000 exactly
 
 ## The patch workflow, which is subtle and cost three fix rounds
 

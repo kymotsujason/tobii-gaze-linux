@@ -1355,6 +1355,17 @@ git commit -m "feat: display area readback gate with corner-to-rect conversion"
 - Consumes: `gz_client_*`, `gz_display_verify`
 - Produces: `~/.local/share/tobii-gaze/calibration.bin`; **an answer to spec section 13 item 2**
 
+**PRECONDITION, and it cannot be checked by code.** Calibration is computed in the
+display-area frame, so it is only as correct as that frame. Task 5 wrote
+`~/.config/tobii.json` with a **measured** `w_mm` 597 and `h_mm` 336, but `z_mm`, `tilt`,
+`cx` and `cy` are still the daemon's shipped template defaults, not measurements. Measure
+them physically before calibrating: `z_mm` is the tracker plane to screen plane distance,
+`tilt` is screen tilt in degrees, and `cy` is how far below the screen edge the tracker
+sits. Then apply them with `tobiifreed --force-display-area` and confirm the readback.
+`gz_display_verify` will NOT catch this, because it compares the device against the
+config's own values and therefore passes cleanly with a wrong `z_mm`. Calibrating first
+produces a plausible-but-wrong frame, which is the exact failure Task 5 exists to escape.
+
 - [ ] **Step 1: Implement the calibration sequence**
 
 Nine stimulus points in a 3x3 grid at normalised 0.1/0.5/0.9. For each: display it, wait 1200 ms for the eye to settle, then send `add_calibration_point` (0x21) with two f64 in normalised screen coordinates.

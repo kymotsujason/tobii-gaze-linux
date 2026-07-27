@@ -273,3 +273,23 @@ Task 5: minor (deferred to Task 12, which already edits this block): the genuine
 Task 5: minor (noted): patch header index blob fd9e7e4 is the post-0000 blob, not the
   pinned blob. Harmless, git apply consults the hash only when context fails to match, and
   the reviewer proved context matches both alone and in the stack.
+Task 5: doc re-review verdict = ALL REQUIRED ITEMS ADDRESSED. It verified the anchor
+  grammar independently and reproduced the arithmetic: "c" gives ox_mm -298.5, and
+  "b - 10" gives -h/2 - 10 = -178 so oy_mm = 10, which is EXACTLY the BL=(-299,10,0) the
+  device reports. It also confirmed "b - 10" is the literal shipped template value at
+  main.zig:548, so the plan snippet now matches what --init-config writes.
+  It found three further issues, all fixed by controller:
+  - RESUME called the readback "598 x 336" beside a bullet asserting 597 is measured,
+    reading as a 1 mm discrepancy in the one document meant to settle geometry. It is
+    {d:.0} rounding of 298.5 per side. Now states 597 x 336 printed rounded, and records
+    the {d:.3} readback of 597.000 x 336.000.
+  - RESUME's status table still said tasks 5-9 not started, contradicting a bullet 70
+    lines below. Table now lists Task 5 complete separately.
+  - MOST VALUABLE, and it went beyond what it was asked: my plan to "raise the unmeasured
+    mounting parameters at Task 13" DOES NOT WORK. task-13-brief is extracted from the
+    plan's Task 13 section, which never mentions the display area, z_mm, or measuring
+    anything. And Task 12's gz_display_verify compares the device against the config's
+    OWN want values, so it passes cleanly with an unmeasured z_mm of 0. The obligation was
+    invisible exactly where it mattered. FIXED: the plan's Task 13 now opens with an
+    explicit PRECONDITION block naming what to measure, saying to apply it with
+    --force-display-area, and stating that gz_display_verify cannot catch this.
