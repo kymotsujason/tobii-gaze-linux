@@ -1,0 +1,743 @@
+diff --git a/applications/tobiifreed/src/main.zig b/applications/tobiifreed/src/main.zig
+index 42b49e8..cc70cf8 100644
+--- a/applications/tobiifreed/src/main.zig
++++ b/applications/tobiifreed/src/main.zig
+@@ -39,12 +39,37 @@ var display_area: Tracker.DisplayArea = .{};
+ var force_display_area: bool = false;
+ 
+ // False from the moment a transfer reports the device gone until the session is
+-// rebuilt. Task 9 (P8) turns this into a status message; forwardCommand already
+-// reads it to refuse commands there is no endpoint for.
++// rebuilt. forwardCommand reads it to refuse commands there is no endpoint for,
++// and it is the device_present byte of the status message.
+ var device_present: std.atomic.Value(bool) = std.atomic.Value(bool).init(true);
++var calibration_applied: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
++
++// The last blob a client applied successfully, replayed onto a session that has
++// come back. Written on the main thread from cal_apply and read on the USB
++// thread from applySavedCalibration, which cannot overlap: the main thread only
++// reaches cal_apply with device_present set and an acknowledged usbPause, and a
++// USB thread inside reconnect() has cleared the first and stopped answering the
++// second.
++var saved_cal: [4096]u8 = undefined;
++var saved_cal_len: usize = 0;
++
++fn broadcastStatus() void {
++    server.setStatus(device_present.load(.acquire), calibration_applied.load(.acquire));
++}
+ 
+-fn broadcastStatus() void {} // filled in by Task 9 (P8)
+-fn applySavedCalibration() void {} // filled in by Task 9 (P8/P9)
++/// Replay the saved calibration onto a rebuilt session. Runs on the USB thread
++/// after core.set_hooks, which is deliberate: calApply saves and restores
++/// hook_response around its own state machine, so the routing hook installed
++/// just before survives. A helper that called set_hooks itself would not.
++fn applySavedCalibration() void {
++    if (saved_cal_len == 0) return;
++    if (tracker.calApply(saved_cal[0..saved_cal_len])) {
++        log.info("re-applied {d}-byte calibration after reconnect", .{saved_cal_len});
++    } else {
++        calibration_applied.store(false, .release);
++        log.err("failed to re-apply calibration after reconnect", .{});
++    }
++}
+ 
+ // The USB thread owns the bulk endpoint and the core parser state. Client
+ // commands run on the main thread and touch the same globals: request_* writes
+@@ -141,34 +166,63 @@ fn drainGaze() void {
+ // When a client (socket or WS) sends a command that needs to go to the
+ // tracker, we build the TTP frame via tobiifree_core, send it over USB,
+ // and register a pending entry so the response hook can route the
+-// reply back to the right client fd.
++// reply back to the right client.
+ 
+ const MAX_PENDING = 64;
+ 
++/// Where a reply goes. Socket clients are named by slot and generation, never
++/// by fd: a reply is routed from the USB thread an arbitrary time after the
++/// command, and a closed fd number is reissued to the next connection at once.
++/// Measured on the fd-keyed version: 21 of 2000 replies reached a client that
++/// had not asked for them. The ws server keeps its own client array and its own
++/// fd space, so its targets still carry an fd.
++const Target = struct {
++    ref: Server.ClientRef,
++    fd: std.posix.fd_t,
++    is_ws: bool,
++};
++
++fn sendTo(target: Target, msg: []const u8) void {
++    if (target.is_ws) {
++        if (ws) |*w| w.sendToClient(target.fd, msg);
++    } else {
++        server.sendToRef(target.ref, msg);
++    }
++}
++
+ const PendingEntry = struct {
+     request_id: u32,
+-    client_fd: std.posix.fd_t,
++    target: Target,
+     cmd_type: u8,
+-    is_ws: bool,
+ };
+ 
+ var pending: [MAX_PENDING]?PendingEntry = [_]?PendingEntry{null} ** MAX_PENDING;
+ 
+-fn addPending(request_id: u32, client_fd: std.posix.fd_t, cmd_type: u8, is_ws: bool) void {
++fn addPending(request_id: u32, target: Target, cmd_type: u8) void {
+     for (&pending) |*slot| {
+         if (slot.* == null) {
+             slot.* = .{
+                 .request_id = request_id,
+-                .client_fd = client_fd,
++                .target = target,
+                 .cmd_type = cmd_type,
+-                .is_ws = is_ws,
+             };
++            // Keeps the client's slot alive until the reply is queued, so a
++            // client that closes its write side straight after its last command
++            // still receives that command's answer.
++            if (!target.is_ws) server.holdRef(target.ref);
+             return;
+         }
+     }
+     log.warn("pending table full, dropping request_id={}", .{request_id});
+ }
+ 
++/// Release the slot hold taken by addPending. Call it after the reply has been
++/// queued, never before: in between, the main thread is free to reap a
++/// half-closed client and the reply lands nowhere.
++fn finishPending(entry: PendingEntry) void {
++    if (!entry.target.is_ws) server.releaseRef(entry.target.ref);
++}
++
+ fn takePending(request_id: u32) ?PendingEntry {
+     for (&pending) |*slot| {
+         if (slot.*) |entry| {
+@@ -197,22 +251,18 @@ fn onResponse(request_id: u32, payload_ptr: [*]const u8, payload_len: u32) void
+     var buf: [proto.HEADER_SIZE + 1 + MAX_RESPONSE_PAYLOAD]u8 = undefined;
+     if (payload_len > MAX_RESPONSE_PAYLOAD) {
+         log.err("response payload {d} for cmd=0x{x:0>2} exceeds maximum {d}, dropping", .{ payload_len, entry.cmd_type, MAX_RESPONSE_PAYLOAD });
+-        sendResult(entry.client_fd, entry.cmd_type, entry.is_ws, false, &.{});
++        sendError(entry.target, .failed);
++        finishPending(entry);
+         return;
+     }
+     const payload = payload_ptr[0..payload_len];
+     const msg_len = proto.encodeResponse(&buf, entry.cmd_type, payload);
++    sendTo(entry.target, buf[0..msg_len]);
++    finishPending(entry);
+ 
+-    if (entry.is_ws) {
+-        if (ws) |*w| {
+-            w.sendToClient(entry.client_fd, buf[0..msg_len]);
+-        }
+-    } else {
+-        // Runs on the USB thread for forwarded commands; sendToClient locks.
+-        server.sendToClient(entry.client_fd, buf[0..msg_len]);
+-    }
+-
+-    log.debug("routed response for cmd=0x{x:0>2} to fd={}", .{ entry.cmd_type, entry.client_fd });
++    log.debug("routed response for cmd=0x{x:0>2} to slot={d} gen={d} ws={}", .{
++        entry.cmd_type, entry.target.ref.slot, entry.target.ref.gen, entry.target.is_ws,
++    });
+ }
+ 
+ /// Forward a daemon-protocol command to the USB tracker.
+@@ -230,12 +280,21 @@ fn forwardCommand(client_fd: std.posix.fd_t, cmd_type: u8, payload: []const u8,
+         else => {},
+     }
+ 
++    // Resolved here, on the main thread, while the client is still in its slot
++    // and nothing else can accept into it. Everything sent back for this command
++    // goes to the target, so no reply is ever addressed by a bare fd number.
++    const target = Target{
++        .ref = if (is_ws) Server.no_client else (server.refForFd(client_fd) orelse Server.no_client),
++        .fd = client_fd,
++        .is_ws = is_ws,
++    };
++
+     // A reconnect owns transport and tracker outright and the handle is null
+     // between teardown and a successful reopen. Refuse here rather than spend
+     // usbPause's 1s budget waiting on a thread that has stopped polling.
+     if (!device_present.load(.acquire)) {
+         log.warn("refusing cmd=0x{x:0>2}: device not present", .{cmd_type});
+-        sendError(client_fd, is_ws, .usb_busy);
++        sendError(target, .usb_busy);
+         return;
+     }
+ 
+@@ -265,7 +324,7 @@ fn forwardCommand(client_fd: std.posix.fd_t, cmd_type: u8, payload: []const u8,
+         // Its own code: nothing reached the device, so unlike proto.Err.failed
+         // this one is worth retrying, and the frame carries nothing else to
+         // tell the two apart.
+-        sendError(client_fd, is_ws, .usb_busy);
++        sendError(target, .usb_busy);
+         return;
+     }
+ 
+@@ -275,25 +334,26 @@ fn forwardCommand(client_fd: std.posix.fd_t, cmd_type: u8, payload: []const u8,
+         // State machine commands — driven synchronously, response sent when done.
+         .start_calibration => {
+             const ok = tracker.startCalibration();
+-            sendResult(client_fd, cmd_type, is_ws, ok, &.{});
++            sendResult(target, cmd_type, ok, &.{});
+         },
+         .finish_calibration => {
+             const ok = tracker.finishCalibration();
+             if (ok) {
+                 const blob_ptr = core.cal_finish_blob_ptr();
+                 const blob_len = core.cal_finish_blob_len();
+-                sendResult(client_fd, cmd_type, is_ws, true, blob_ptr[0..blob_len]);
++                sendResult(target, cmd_type, true, blob_ptr[0..blob_len]);
+             } else {
+-                sendResult(client_fd, cmd_type, is_ws, false, &.{});
++                sendResult(target, cmd_type, false, &.{});
+             }
+         },
+         .cal_apply => {
+             if (payload.len == 0) {
+-                sendResult(client_fd, cmd_type, is_ws, false, &.{});
++                sendResult(target, cmd_type, false, &.{});
+                 return;
+             }
+             const ok = tracker.calApply(payload);
+-            sendResult(client_fd, cmd_type, is_ws, ok, &.{});
++            if (ok) saveCalibration(payload);
++            sendResult(target, cmd_type, ok, &.{});
+         },
+ 
+         // Single request/response commands — forwarded to USB, response routed back.
+@@ -309,7 +369,8 @@ fn forwardCommand(client_fd: std.posix.fd_t, cmd_type: u8, payload: []const u8,
+             // can be consumed at any moment, and a reply with no pending entry is
+             // dropped with only a debug line. The entry is removed again if the
+             // send fails, so a failed send does not leak a slot.
+-            if (request_id != 0) addPending(request_id, client_fd, cmd_type, is_ws);
++            if (request_id != 0) addPending(request_id, target, cmd_type);
++            checkCoreEvictions();
+             if (transport.send(core.session_out_ptr()[0..out_len])) {
+                 if (request_id != 0) {
+                     log.debug("forwarded cmd=0x{x:0>2} request_id={} for fd={}", .{ cmd_type, request_id, client_fd });
+@@ -318,7 +379,9 @@ fn forwardCommand(client_fd: std.posix.fd_t, cmd_type: u8, payload: []const u8,
+                 }
+             } else {
+                 log.err("USB send failed for cmd=0x{x:0>2}", .{cmd_type});
+-                if (request_id != 0) _ = takePending(request_id);
++                if (request_id != 0) {
++                    if (takePending(request_id)) |entry| finishPending(entry);
++                }
+             }
+         },
+     }
+@@ -349,19 +412,15 @@ fn buildRequest(cmd: proto.Cmd, payload: []const u8) ?u32 {
+     };
+ }
+ 
+-fn sendError(client_fd: std.posix.fd_t, is_ws: bool, code: proto.Err) void {
++fn sendError(target: Target, code: proto.Err) void {
+     var err_buf: [proto.HEADER_SIZE + 4]u8 = undefined;
+     proto.encodeError(&err_buf, @intFromEnum(code));
+-    if (is_ws) {
+-        if (ws) |*w| w.sendToClient(client_fd, &err_buf);
+-    } else {
+-        server.sendToClient(client_fd, &err_buf);
+-    }
++    sendTo(target, &err_buf);
+ }
+ 
+-fn sendResult(client_fd: std.posix.fd_t, cmd_type: u8, is_ws: bool, ok: bool, payload: []const u8) void {
++fn sendResult(target: Target, cmd_type: u8, ok: bool, payload: []const u8) void {
+     if (!ok) {
+-        sendError(client_fd, is_ws, .failed);
++        sendError(target, .failed);
+         return;
+     }
+     // Sized by what the daemon can emit, not by what a client can send: the only
+@@ -372,16 +431,43 @@ fn sendResult(client_fd: std.posix.fd_t, cmd_type: u8, is_ws: bool, ok: bool, pa
+     const max_payload = core.scratch_size();
+     if (payload.len > max_payload) {
+         log.err("response payload {d} exceeds maximum {d}", .{ payload.len, max_payload });
+-        sendResult(client_fd, cmd_type, is_ws, false, &.{});
++        sendError(target, .failed);
+         return;
+     }
+     std.debug.assert(max_payload + proto.HEADER_SIZE + 1 <= buf.len);
+     const msg_len = proto.encodeResponse(&buf, cmd_type, payload);
+-    if (is_ws) {
+-        if (ws) |*w| w.sendToClient(client_fd, buf[0..msg_len]);
++    sendTo(target, buf[0..msg_len]);
++}
++
++/// Remember a blob that the device accepted, so a reconnect can replay it.
++fn saveCalibration(blob: []const u8) void {
++    // calApply already refused anything past core.scratch_size(), which is the
++    // only bound that matters for the device. This one guards the copy, and
++    // says so rather than silently keeping a truncated blob.
++    if (blob.len > saved_cal.len) {
++        saved_cal_len = 0;
++        log.err("calibration blob {d} exceeds replay buffer {d}, not saved for reconnect", .{ blob.len, saved_cal.len });
+     } else {
+-        server.sendToClient(client_fd, buf[0..msg_len]);
++        @memcpy(saved_cal[0..blob.len], blob);
++        saved_cal_len = blob.len;
+     }
++    calibration_applied.store(true, .release);
++    broadcastStatus();
++}
++
++// The core keeps its own 32-entry seq to request_id table and, when it is full,
++// overwrites slot 0 without a word. The victim's response then finds no entry
++// and is discarded, so the client waits for a reply that will never come. Task
++// 6's progress gate keeps at most one request outstanding, so the table only
++// fills from requests the device never answered, but a silent version of that
++// is not something to discover from a hung client.
++var core_evictions_seen: u32 = 0;
++
++fn checkCoreEvictions() void {
++    const n = core.pending_evictions();
++    if (n == core_evictions_seen) return;
++    log.warn("core pending table overflowed {d} more time(s), a response was discarded", .{n -% core_evictions_seen});
++    core_evictions_seen = n;
+ }
+ 
+ // ── Config loading (same as overlay) ────────────────────────────────
+@@ -520,7 +606,7 @@ fn pollWait() void {
+     poll_fds[n] = .{ .fd = server.listen_fd, .events = std.posix.POLL.IN, .revents = 0 };
+     n += 1;
+ 
+-    // The USB thread removes clients through sendToClient, so reading an fd out
++    // The USB thread removes clients through sendToRef, so reading an fd out
+     // of the array needs the lock. It is held for the copy and nothing else.
+     server.lock.lock();
+     for (&server.clients) |*slot| {
+@@ -532,6 +618,12 @@ fn pollWait() void {
+         poll_fds[n] = .{ .fd = client.fd, .events = events, .revents = 0 };
+         n += 1;
+     }
++    // readCommands dispatches at most MAX_CMDS_PER_PASS per client per pass and
++    // leaves the rest buffered, which is work already in hand. Waiting on the
++    // socket for it would add POLL_TIMEOUT_MS to every batch of eight: 500
++    // pipelined commands would spend 3.1s of the run asleep with the work
++    // sitting in a buffer.
++    const busy = server.pendingWorkLocked();
+     server.lock.unlock();
+ 
+     if (ws) |*w| {
+@@ -547,7 +639,8 @@ fn pollWait() void {
+         }
+     }
+ 
+-    _ = std.posix.poll(poll_fds[0..n], POLL_TIMEOUT_MS) catch 0;
++    const timeout: i32 = if (busy) 0 else POLL_TIMEOUT_MS;
++    _ = std.posix.poll(poll_fds[0..n], timeout) catch 0;
+ }
+ 
+ // ── Main ────────────────────────────────────────────────────────────
+@@ -893,7 +986,8 @@ fn failPending() void {
+         if (slot.*) |entry| {
+             slot.* = null;
+             n += 1;
+-            sendError(entry.client_fd, entry.is_ws, .failed);
++            sendError(entry.target, .failed);
++            finishPending(entry);
+         }
+     }
+     if (n > 0) log.warn("failed {d} in-flight requests on USB loss", .{n});
+diff --git a/applications/tobiifreed/src/server.zig b/applications/tobiifreed/src/server.zig
+index ec9f4e4..ecef7d7 100644
+--- a/applications/tobiifreed/src/server.zig
++++ b/applications/tobiifreed/src/server.zig
+@@ -11,8 +11,43 @@ const log = std.log.scoped(.server);
+ 
+ const MAX_CLIENTS = 16;
+ 
++// One read can deliver a whole pipelined batch, and every forwarded command
++// costs a USB round trip, so dispatching a buffer to exhaustion parks the main
++// loop for as long as the batch takes: measured at 15.1s for 500 commands, over
++// which a second client received nothing at all. Bounding the pass is only half
++// the fix, since the next read of a client that has gone quiet returns
++// WouldBlock; see readCommands for why dispatch is independent of the read.
++const MAX_CMDS_PER_PASS = 8;
++
++// Derived, not chosen. The output queue is 131072 bytes, a gaze frame is
++// HEADER_SIZE + 392 = 397 bytes, and the tracker delivers 33.2 of them a
++// second, so the queue holds 330 frames, or 9.9s of gaze. A client that has
++// accepted nothing for longer than its own queue was built to cover is wedged
++// rather than slow, and it costs one of MAX_CLIENTS slots plus every sample.
++const BACKPRESSURE_TIMEOUT_MS = 10_000;
++
+ const Client = struct {
+     fd: std.posix.fd_t,
++    // Identity of the connection occupying this slot, taken from Server.slot_gen
++    // at accept. Responses are routed by slot and generation because an fd
++    // number is reissued by the kernel the moment it closes, and a reply still
++    // in flight when its client vanished would otherwise be handed to whoever
++    // inherited the number. Never 0, so 0 is a usable "no client" ref.
++    gen: u32,
++    // Set the first time a write is refused, cleared when the queue fully
++    // drains. 0 means not stalled. Milliseconds, so the reference is wall time.
++    stall_since_ms: i64,
++    // The peer has half-closed. Commands already buffered are still dispatched,
++    // then the slot is released, so "send a batch, then close" does not lose
++    // its tail to the bounded pass above.
++    eof: bool,
++    // Replies this client has been promised but not yet been sent. A slot with
++    // holds outstanding is never released on eof: the reply comes back on the
++    // USB thread after the command, so a client that half-closes right after
++    // its last command would otherwise lose exactly that reply. Measured on the
++    // version without this: 99 of 100 answered, and one
++    // "dropping 170 bytes for departed client" in the log.
++    holds: u32,
+     subscribed: bool,
+     // Per-client read buffer for incoming commands. Large enough for a
+     // cal_apply payload carrying a full calibration blob.
+@@ -31,6 +66,13 @@ const Client = struct {
+ pub const ForwardFn = *const fn (client_fd: std.posix.fd_t, cmd_type: u8, payload: []const u8, is_ws: bool) void;
+ 
+ pub const Server = struct {
++    /// Durable name for a connected client. Resolve one on the main thread while
++    /// the client is still in its slot, then route to it later from anywhere.
++    pub const ClientRef = struct { slot: u8, gen: u32 };
++
++    /// Matches nothing, ever: generations start at 1.
++    pub const no_client = ClientRef{ .slot = 0, .gen = 0 };
++
+     listen_fd: std.posix.fd_t,
+     clients: [MAX_CLIENTS]?Client,
+     n_clients: usize,
+@@ -38,7 +80,16 @@ pub const Server = struct {
+     socket_path_len: usize,
+     forward_fn: ForwardFn,
+     dropped: u64,
+-    // The USB thread routes command responses back through sendToClient, so the
++    // Bumped on every accept, so a (slot, gen) pair names one connection for the
++    // life of the process. Kept out of Client because it has to outlive the
++    // client that vacated the slot.
++    slot_gen: [MAX_CLIENTS]u32,
++    // Last device status broadcast, replayed to each client as it connects. A
++    // client that arrives during an outage otherwise sees only silence, which
++    // looks exactly like a healthy tracker nobody is sitting in front of.
++    status_present: bool,
++    status_cal: bool,
++    // The USB thread routes command responses back through sendToRef, so the
+     // client array and every out queue have two writers. Held only for bounded,
+     // non-blocking work: readCommands drops it around dispatchCmd, which parks
+     // the USB thread for up to a second and would otherwise stall it here.
+@@ -80,6 +131,11 @@ pub const Server = struct {
+         self.socket_path_len = path.len;
+         self.forward_fn = forward_fn;
+         self.dropped = 0;
++        for (&self.slot_gen) |*g| g.* = 0;
++        // The server only comes up after the tracker handshake succeeds, so a
++        // client connecting before the first transition is right to see present.
++        self.status_present = true;
++        self.status_cal = false;
+         self.lock = .{};
+         @memcpy(self.socket_path[0..path.len], path);
+ 
+@@ -95,10 +151,18 @@ pub const Server = struct {
+ 
+             // Find empty slot.
+             var placed = false;
+-            for (&self.clients) |*slot| {
++            for (&self.clients, 0..) |*slot, i| {
+                 if (slot.* == null) {
++                    // Before the client is built, so no two occupants of this
++                    // slot ever share a generation.
++                    self.slot_gen[i] +%= 1;
++                    if (self.slot_gen[i] == 0) self.slot_gen[i] = 1;
+                     slot.* = .{
+                         .fd = fd,
++                        .gen = self.slot_gen[i],
++                        .stall_since_ms = 0,
++                        .eof = false,
++                        .holds = 0,
+                         .subscribed = false,
+                         .buf = undefined,
+                         .buf_len = 0,
+@@ -108,7 +172,9 @@ pub const Server = struct {
+                     };
+                     self.n_clients += 1;
+                     placed = true;
+-                    log.info("client connected (total: {})", .{self.n_clients});
++                    if (slot.*) |*client| self.queueStatus(client);
++                    self.flush(slot);
++                    log.info("client connected (slot {d}, total: {})", .{ i, self.n_clients });
+                     break;
+                 }
+             }
+@@ -119,37 +185,38 @@ pub const Server = struct {
+         }
+     }
+ 
+-    /// Read and dispatch commands from all clients.
++    /// Read and dispatch commands from all clients, at most MAX_CMDS_PER_PASS
++    /// each, so one client's pipelined batch cannot own the main loop.
++    ///
++    /// Dispatch is deliberately independent of the read. Bounding the pass alone
++    /// strands the remainder: a client that sent 500 commands and then went
++    /// quiet returns WouldBlock on every later read, and a handler that gives up
++    /// on that error moves to the next slot with 492 complete messages still
++    /// sitting in the buffer, unserved until the client happens to send another
++    /// byte. So a failed read only records why, and the buffer is drained on its
++    /// own terms. main.zig polls with a zero timeout while pendingWorkLocked
++    /// holds, or each of those passes would also wait out POLL_TIMEOUT_MS.
+     pub fn readCommands(self: *Server) void {
+         for (&self.clients) |*slot| {
+             self.lock.lock();
+             defer self.lock.unlock();
+             const client = &(slot.* orelse continue);
+-            const space = client.buf.len - client.buf_len;
+-            if (space == 0) {
+-                // Wiping the buffer here would silently drop a partial message,
+-                // making an oversized command vanish with no error.
+-                log.err("client message exceeds buffer, disconnecting", .{});
+-                self.removeClient(slot);
+-                continue;
+-            }
+-            const n = std.posix.read(client.fd, client.buf[client.buf_len..]) catch |err| {
+-                if (err == error.WouldBlock) continue;
+-                // Client disconnected.
+-                self.removeClient(slot);
+-                continue;
+-            };
+-            if (n == 0) {
+-                // EOF.
+-                self.removeClient(slot);
+-                continue;
++
++            // A full buffer is not read from: the dispatch below is what makes
++            // room, and if it cannot, the oversize check at the end fires.
++            if (!client.eof and client.buf_len < client.buf.len) {
++                if (std.posix.read(client.fd, client.buf[client.buf_len..])) |n| {
++                    if (n == 0) client.eof = true else client.buf_len += n;
++                } else |err| {
++                    if (err != error.WouldBlock) client.eof = true;
++                }
+             }
+-            client.buf_len += n;
+ 
+             // Process complete messages.
+             var pos: usize = 0;
++            var dispatched: usize = 0;
+             var closed = false;
+-            while (pos + proto.HEADER_SIZE <= client.buf_len) {
++            while (dispatched < MAX_CMDS_PER_PASS and pos + proto.HEADER_SIZE <= client.buf_len) {
+                 const hdr = proto.decodeHeader(client.buf[pos..][0..proto.HEADER_SIZE]);
+                 const msg_end = pos + proto.HEADER_SIZE + hdr.payload_len;
+                 if (msg_end > client.buf_len) break;
+@@ -157,7 +224,7 @@ pub const Server = struct {
+                 // This unlock is what keeps the daemon from deadlocking, not a
+                 // scope tidy-up. Dispatch runs usbPause, which waits up to a
+                 // second for the USB thread to acknowledge. That thread reaches
+-                // onResponse -> sendToClient, which takes this lock. Held here,
++                // onResponse -> sendToRef, which takes this lock. Held here,
+                 // the USB thread blocks, never acknowledges, and the main
+                 // thread waits out both budgets on every command. Nothing else
+                 // reads buf, so dropping the lock costs nothing.
+@@ -165,6 +232,7 @@ pub const Server = struct {
+                 self.dispatchCmd(client, hdr.msg_type, client.buf[pos + proto.HEADER_SIZE .. msg_end]);
+                 self.lock.lock();
+                 pos = msg_end;
++                dispatched += 1;
+                 // A response that could not be queued disconnects the client,
+                 // and that happens inside the dispatch above. The slot is gone.
+                 if (slot.* == null) {
+@@ -182,9 +250,46 @@ pub const Server = struct {
+                 }
+                 client.buf_len = remaining;
+             }
++
++            // Still full after compaction means nothing was dispatched, which
++            // means the message at the head needs more than the buffer holds.
++            // Wiping it would silently drop a partial message, making an
++            // oversized command vanish with no error.
++            if (client.buf_len == client.buf.len) {
++                log.err("client message exceeds buffer, disconnecting", .{});
++                self.removeClient(slot);
++                continue;
++            }
++            // Half-closed, nothing complete left and nothing owed: no further
++            // bytes can arrive, so the slot is released. Releasing it on the
++            // read instead would discard everything the peer sent before
++            // closing, and releasing it before holds reaches zero would discard
++            // the reply to the command the peer closed straight after.
++            if (client.eof and client.holds == 0 and !hasCompleteMessage(client)) {
++                self.removeClient(slot);
++            }
+         }
+     }
+ 
++    fn hasCompleteMessage(client: *const Client) bool {
++        if (client.buf_len < proto.HEADER_SIZE) return false;
++        const hdr = proto.decodeHeader(client.buf[0..proto.HEADER_SIZE]);
++        // Widened before the add: a declared payload_len near the u32 ceiling
++        // would otherwise overflow the sum rather than compare larger.
++        return proto.HEADER_SIZE + @as(usize, hdr.payload_len) <= client.buf_len;
++    }
++
++    /// True while any client still holds a complete buffered command, which is
++    /// work the main loop owes without needing to hear from the socket first.
++    /// Caller holds the lock.
++    pub fn pendingWorkLocked(self: *Server) bool {
++        for (&self.clients) |*slot| {
++            const client = &(slot.* orelse continue);
++            if (hasCompleteMessage(client)) return true;
++        }
++        return false;
++    }
++
+     fn dispatchCmd(self: *Server, client: *Client, msg_type: u8, payload: []const u8) void {
+         if (msg_type == @intFromEnum(proto.Cmd.subscribe)) {
+             // Written with the lock released, since readCommands drops it
+@@ -228,7 +333,17 @@ pub const Server = struct {
+         const client = &(slot.* orelse return);
+         while (client.out_off < client.out_len) {
+             const n = std.posix.write(client.fd, client.out[client.out_off..client.out_len]) catch |err| {
+-                if (err == error.WouldBlock) return; // retried by flushPending
++                if (err == error.WouldBlock) {
++                    // The clock starts at the first refusal rather than at
++                    // enqueue, because a queue that drains on the next pass is
++                    // ordinary. An unsubscribed client is never armed: it has no
++                    // standing stream to fall behind on, and staying silent for
++                    // hours is a legitimate thing for a control client to do.
++                    if (client.subscribed and client.stall_since_ms == 0) {
++                        client.stall_since_ms = std.time.milliTimestamp();
++                    }
++                    return; // retried by flushPending
++                }
+                 self.removeClient(slot);
+                 return;
+             };
+@@ -240,37 +355,119 @@ pub const Server = struct {
+         }
+         client.out_len = 0;
+         client.out_off = 0;
++        client.stall_since_ms = 0;
+     }
+ 
+-    /// Send a framed message to one client fd. Unlike gaze, a response must not
+-    /// vanish: a client whose queue cannot take the whole frame is disconnected
+-    /// rather than left reading a stream with a hole in it.
++    /// Queue the last known device status. Caller holds the lock.
++    fn queueStatus(self: *Server, client: *Client) void {
++        var msg: [proto.HEADER_SIZE + proto.STATUS_SIZE]u8 = undefined;
++        proto.encodeStatus(&msg, self.status_present, self.status_cal);
++        // Unlike a response, a dropped status is self-correcting: the next
++        // transition sends the current one. Not worth dropping a client for.
++        if (!enqueue(client, &msg)) {
++            log.warn("output queue full, status not sent to fd={}", .{client.fd});
++        }
++    }
++
++    /// Record a device state change and tell every connected client.
+     /// Safe to call from the USB thread.
+-    pub fn sendToClient(self: *Server, target_fd: std.posix.fd_t, msg: []const u8) void {
++    pub fn setStatus(self: *Server, present: bool, cal: bool) void {
+         self.lock.lock();
+         defer self.lock.unlock();
++        self.status_present = present;
++        self.status_cal = cal;
+         for (&self.clients) |*slot| {
+-            const client = &(slot.* orelse continue);
+-            if (client.fd != target_fd) continue;
+-            if (!enqueue(client, msg)) {
+-                log.err("output queue full for fd={}, dropping client rather than the response", .{target_fd});
+-                self.removeClient(slot);
+-                return;
+-            }
++            if (slot.*) |*client| self.queueStatus(client);
+             self.flush(slot);
++        }
++    }
++
++    /// Name the client currently on `fd`. Resolve this while the command is
++    /// still being dispatched, then route the reply to the ref rather than to
++    /// the fd: the reply is delivered from the USB thread an arbitrary time
++    /// later, by which point the fd number may have been reissued.
++    pub fn refForFd(self: *Server, fd: std.posix.fd_t) ?ClientRef {
++        self.lock.lock();
++        defer self.lock.unlock();
++        for (&self.clients, 0..) |*slot, i| {
++            const client = &(slot.* orelse continue);
++            if (client.fd == fd) return .{ .slot = @intCast(i), .gen = client.gen };
++        }
++        return null;
++    }
++
++    /// Promise this client a reply, so a half-close cannot free the slot before
++    /// it arrives. Paired with releaseRef, which must run only after the reply
++    /// has been queued: releasing first reopens the window it exists to close.
++    pub fn holdRef(self: *Server, ref: ClientRef) void {
++        if (ref.gen == 0 or ref.slot >= MAX_CLIENTS) return;
++        self.lock.lock();
++        defer self.lock.unlock();
++        const client = &(self.clients[ref.slot] orelse return);
++        if (client.gen != ref.gen) return;
++        client.holds += 1;
++    }
++
++    pub fn releaseRef(self: *Server, ref: ClientRef) void {
++        if (ref.gen == 0 or ref.slot >= MAX_CLIENTS) return;
++        self.lock.lock();
++        defer self.lock.unlock();
++        const client = &(self.clients[ref.slot] orelse return);
++        if (client.gen != ref.gen or client.holds == 0) return;
++        client.holds -= 1;
++    }
++
++    /// Send a framed message to one named client. A generation that no longer
++    /// matches means the client that asked has gone, so the message is dropped:
++    /// the alternative is handing it to whoever took the slot, which is exactly
++    /// the failure this ref exists to prevent.
++    /// Safe to call from the USB thread.
++    pub fn sendToRef(self: *Server, ref: ClientRef, msg: []const u8) void {
++        if (ref.gen == 0 or ref.slot >= MAX_CLIENTS) return;
++        self.lock.lock();
++        defer self.lock.unlock();
++        const slot = &self.clients[ref.slot];
++        const client = &(slot.* orelse {
++            log.debug("dropping {d} bytes for departed client (slot {d})", .{ msg.len, ref.slot });
++            return;
++        });
++        if (client.gen != ref.gen) {
++            log.debug("dropping {d} bytes for departed client (slot {d}, gen {d} != {d})", .{
++                msg.len, ref.slot, ref.gen, client.gen,
++            });
+             return;
+         }
++        if (!enqueue(client, msg)) {
++            log.err("output queue full for fd={}, dropping client rather than the response", .{client.fd});
++            self.removeClient(slot);
++            return;
++        }
++        self.flush(slot);
+     }
+ 
+     /// Retry queued output. Called every main-loop iteration so a frame parked
+     /// by WouldBlock resumes without waiting for the next gaze sample, which an
+     /// unsubscribed client would never get.
++    ///
++    /// Also where a wedged client is finally let go. Task 7 stopped
++    /// disconnecting on EAGAIN, which was right, but left nothing at all
++    /// bounding a subscriber that never reads: it keeps one of MAX_CLIENTS slots
++    /// and turns every gaze sample into a counted drop, forever.
+     pub fn flushPending(self: *Server) void {
+         self.lock.lock();
+         defer self.lock.unlock();
++        const now = std.time.milliTimestamp();
+         for (&self.clients) |*slot| {
++            if (slot.*) |*client| {
++                if (client.out_off < client.out_len) self.flush(slot);
++            }
++            // Re-read: flush can have removed the slot on a hard write error.
+             const client = &(slot.* orelse continue);
+-            if (client.out_off < client.out_len) self.flush(slot);
++            if (client.stall_since_ms == 0) continue;
++            const stalled_ms = now - client.stall_since_ms;
++            if (stalled_ms < BACKPRESSURE_TIMEOUT_MS) continue;
++            log.err("client fd={} accepted nothing for {d}ms, disconnecting", .{ client.fd, stalled_ms });
++            self.removeClient(slot);
+         }
+     }
+ 

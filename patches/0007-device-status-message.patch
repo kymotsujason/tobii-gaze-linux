@@ -1,0 +1,78 @@
+diff --git a/driver/src/daemon_protocol.zig b/driver/src/daemon_protocol.zig
+index d54fea1..c117c1b 100644
+--- a/driver/src/daemon_protocol.zig
++++ b/driver/src/daemon_protocol.zig
+@@ -24,9 +24,16 @@ pub const Srv = enum(u8) {
+     gaze = 0x01,
+     response = 0x02,
+     display_area = 0x03,
++    status = 0x04,
+     err = 0xFF,
+ };
+ 
++/// Bumped whenever an existing message changes shape. A client that reads a
++/// version it does not know should stop rather than parse the stream blind.
++pub const PROTOCOL_VERSION: u8 = 1;
++
++pub const STATUS_SIZE = 3;
++
+ // ── Client → Daemon message types ───────────────────────────────────
+ 
+ pub const Cmd = enum(u8) {
+@@ -55,6 +62,11 @@ pub const Err = enum(u32) {
+     /// rather than run it against a shared endpoint and a shared parser
+     /// accumulator. Nothing was sent to the device. Retryable.
+     usb_busy = 2,
++    /// Non-exhaustive on purpose. An exhaustive enum turns a code added by a
++    /// newer daemon into an @enumFromInt panic in the reader, which is a worse
++    /// outcome than an unrecognised value the client can log and treat as
++    /// failed.
++    _,
+ };
+ 
+ // ── Encode helpers ──────────────────────────────────────────────────
+@@ -69,6 +81,19 @@ pub fn encodeGaze(buf: *[HEADER_SIZE + @sizeOf(GazeSample)]u8, sample: *const Ga
+     @memcpy(buf[HEADER_SIZE..], std.mem.asBytes(sample));
+ }
+ 
++/// Encode a device status message.
++/// [u8 0x04][u32 LE 3][u8 device_present][u8 calibration_applied][u8 protocol_version]
++///
++/// Distinguishes unplugged hardware from a healthy daemon whose last gaze
++/// sample is merely old, which a gaze stream alone cannot express: both look
++/// like silence.
++pub fn encodeStatus(buf: *[HEADER_SIZE + STATUS_SIZE]u8, present: bool, cal: bool) void {
++    encodeHeader(buf[0..HEADER_SIZE], @intFromEnum(Srv.status), STATUS_SIZE);
++    buf[HEADER_SIZE] = @intFromBool(present);
++    buf[HEADER_SIZE + 1] = @intFromBool(cal);
++    buf[HEADER_SIZE + 2] = PROTOCOL_VERSION;
++}
++
+ pub fn encodeCmd(buf: []u8, cmd: Cmd, payload: []const u8) usize {
+     const plen: u32 = @intCast(payload.len);
+     encodeHeader(buf[0..HEADER_SIZE], @intFromEnum(cmd), plen);
+diff --git a/driver/src/tobiifree_core.zig b/driver/src/tobiifree_core.zig
+index 5394a2c..5fc73ac 100644
+--- a/driver/src/tobiifree_core.zig
++++ b/driver/src/tobiifree_core.zig
+@@ -1062,9 +1062,20 @@ fn pendingInsert(seq: u32, req_id: u32) void {
+         }
+     }
+     // Table full — oldest slot is evicted (simple: use slot 0).
++    // The evicted request's response later finds no entry and is discarded, so
++    // its caller waits forever for a reply. Counted rather than logged: this
++    // file also builds for wasm32-freestanding, where std.log has nowhere to go.
++    // Read it with pending_evictions(); session_reset does not clear it.
++    pending_evicted +%= 1;
+     pending[0] = .{ .used = true, .seq = seq, .req_id = req_id };
+ }
+ 
++var pending_evicted: u32 = 0;
++
++pub export fn pending_evictions() u32 {
++    return pending_evicted;
++}
++
+ fn pendingTake(seq: u32) ?u32 {
+     var i: usize = 0;
+     while (i < MAX_PENDING) : (i += 1) {
