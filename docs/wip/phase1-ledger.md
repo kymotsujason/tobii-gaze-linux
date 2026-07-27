@@ -1099,3 +1099,13 @@ Task 14: MACHINE STATE VERIFIED INDEPENDENTLY by the reviewer, which mattered be
 Task 14: concern 4 DE-RISKED without a logout: `loginctl show-user jason -p Linger` is `no`,
   so the user manager and every unit under it die at logout regardless, making
   PartOf=graphical-session.target belt-and-braces rather than load-bearing.
+Task 14: cleanup verified by controller (commit 91520cb). install-systemd.sh --print now
+  works with NO built binary: I moved the binary aside, ran --print, got the unit text and
+  exit 0, then restored it. The boot-exit ruling is documented in BOTH systemd/README.md
+  and systemd/tobiifreed.service.in, so it reads as a decision rather than an oversight.
+  PartOf provenance corrected to the three units actually in graphical-session.target.wants.
+Task 14: complete (commits e6dc84a..91520cb, review APPROVED, two minors cleaned)
+--- ALL TASKS THAT DO NOT NEED THE HUMAN ARE COMPLETE ---
+Remaining: Task 13 (calibration + persistence experiment) and Task 15 (five minutes of real
+  osu to record a trace) both need the user at the hardware, and Task 16 refits the filter
+  constants against the trace Task 15 produces, so it is blocked behind 15.
