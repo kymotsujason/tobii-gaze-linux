@@ -654,3 +654,19 @@ Task 9: MAX_CMDS_PER_PASS = 8 judged defensible and less arbitrary than the impl
   bound of about 8 x 30 ms x (clients - 1) before another client's first reply, which
   matches the measured 0.50 s for two clients almost exactly. No cliff on either side.
   Honest framing: bounded by measurement, not derived from a rate.
+Task 9 fix round: patches renamed to describe their contents.
+  0007-device-status-message.patch  -> 0007-protocol-status-and-eviction-counter.patch
+    driver/src/daemon_protocol.zig, driver/src/tobiifree_core.zig.
+    Srv.status 0x04, encodeStatus, PROTOCOL_VERSION, STATUS_SIZE, non-exhaustive Err,
+    and the core's pending_evictions counter.
+  0008-pending-entry-lifetime.patch -> 0008-daemon-routing-fairness-and-backpressure.patch
+    applications/tobiifreed/src/main.zig, applications/tobiifreed/src/server.zig.
+    P9 slot+generation routing, the slot hold and its deadline, P8's emission,
+    MAX_CMDS_PER_PASS, and the backpressure timeout.
+  Dependency still runs one way only, 0008 on 0007, matching filename order.
+Task 9 fix round: the eof spin was real and measured. One half-closed client holding an
+  unanswered reply took the daemon from 0.0% to 92.5% of a core, permanently. Fixed by
+  dropping eof fds from the poll set (0.4%) plus a 5s hold deadline that reaps the slot,
+  measured at 5.02s. Needed a throwaway instrumented binary, since the DEVICE ANSWERS
+  EVERY forwarded command it was given, including add_calibration_point outside a
+  calibration session, which replied in 0.02s. That is worth knowing for Task 13.
