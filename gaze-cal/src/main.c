@@ -4,6 +4,10 @@
  * `status` and `monitor`. Tasks 12, 13 and 15 add `display`, `calibrate` and
  * `record` here. Everything that talks to the daemon lives in client.c, so
  * this file stays argv parsing and printf.
+ *
+ * It is also the only file that links Xlib, through stimulus.c. calibrate.c
+ * takes the stimulus as a function pointer so that the calibration sequence
+ * can be tested with no display present.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -14,8 +18,10 @@
 #include <string.h>
 #include <time.h>
 
+#include "calibrate.h"
 #include "client.h"
 #include "display.h"
+#include "stimulus.h"
 
 static volatile sig_atomic_t stop_requested = 0;
 
@@ -141,6 +147,52 @@ static int cmd_monitor(const char *path, double seconds) {
     return 0;
 }
 
+/* ---------------- the X stimulus, wired into calibrate.c ----------------
+ *
+ * One shim so that calibrate.c never sees an Xlib type. Everything that needs
+ * a dot on the gameplay monitor goes through here. */
+static int stim_show(void *ctx, double nx, double ny) {
+    return gz_stimulus_show((struct gz_stimulus *)ctx, nx, ny);
+}
+
+/* Opens the window and runs `fn`. The output geometry is read from RandR at
+ * runtime: the plan and CLAUDE.md both name a monitor that does not exist on
+ * this machine, and a hardcoded offset would have put every dot 1440 px above
+ * where the eye was looking. */
+static int with_stimulus(const char *output,
+                         int (*fn)(const struct gz_stim_ops *, const struct gz_screen *,
+                                   void *), void *arg) {
+    struct gz_stimulus *s = gz_stimulus_open(output);
+    if (s == NULL) return 3;
+
+    struct gz_stim_ops ops;
+    ops.ctx = s;
+    ops.show = stim_show;
+
+    int rc = fn(&ops, gz_stimulus_screen(s), arg);
+
+    gz_stimulus_blank(s);
+    gz_stimulus_close(s);
+    return rc;
+}
+
+struct cal_args { const char *sock, *cfg, *label; };
+
+static int run_calibrate(const struct gz_stim_ops *ops, const struct gz_screen *scr, void *a) {
+    struct cal_args *x = a;
+    return gz_cmd_calibrate(x->sock, x->cfg, ops, scr);
+}
+
+static int run_accuracy(const struct gz_stim_ops *ops, const struct gz_screen *scr, void *a) {
+    struct cal_args *x = a;
+    return gz_cmd_accuracy(x->sock, x->cfg, x->label, ops, scr);
+}
+
+static int run_probe(const struct gz_stim_ops *ops, const struct gz_screen *scr, void *a) {
+    struct cal_args *x = a;
+    return gz_cmd_probe(x->sock, x->cfg, ops, scr);
+}
+
 static void usage(void) {
     fprintf(stderr,
             "usage: gaze-cal [--socket PATH] <command>\n"
@@ -149,10 +201,39 @@ static void usage(void) {
             "  display [--config PATH] [--tol MM]\n"
             "                             read the display area back off the device and\n"
             "                             refuse if it disagrees with the config\n"
+            "  probe [--output NAME] [--config PATH]\n"
+            "                             settle the tracker z-axis sign and the gaze\n"
+            "                             frame orientation. RUN THIS BEFORE CALIBRATING\n"
+            "  calibrate [--output NAME] [--config PATH]\n"
+            "                             nine-point calibration, saves the blob to\n"
+            "                             ~/.local/share/tobii-gaze/calibration.bin\n"
+            "  apply-saved                apply that saved blob to the device\n"
+            "  accuracy [--output NAME] [--config PATH] [--label TEXT]\n"
+            "                             measure gaze error at the nine points\n"
+            "  preview [--sample N]       print N normalised gaze samples on stdout\n"
             "\n"
-            "display exits 0 when they agree, 1 when the device disagrees (fix with\n"
-            "tobiifreed --force-display-area), 3 when the geometry could not be read\n"
-            "at all, and 2 on a usage or config error.\n");
+            "--output names an X RandR output; the default is the X primary.\n"
+            "display, probe, calibrate and accuracy exit 0 when they agree, 1 when the\n"
+            "device disagrees (fix with tobiifreed --force-display-area), 3 when the\n"
+            "geometry could not be read at all, and 2 on a usage or config error.\n");
+}
+
+/* --output/--config/--label, shared by the three stimulus commands. Returns 0,
+ * or -1 on an argument this command does not take. */
+static int parse_common(int argc, char **argv, int from,
+                        const char **output, const char **cfg, const char **label) {
+    for (int a = from; a < argc; a++) {
+        if (strcmp(argv[a], "--output") == 0 && a + 1 < argc) {
+            *output = argv[++a];
+        } else if (strcmp(argv[a], "--config") == 0 && a + 1 < argc) {
+            *cfg = argv[++a];
+        } else if (label != NULL && strcmp(argv[a], "--label") == 0 && a + 1 < argc) {
+            *label = argv[++a];
+        } else {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -210,6 +291,40 @@ int main(int argc, char **argv) {
         if (i + 1 < argc) seconds = atof(argv[i + 1]);
         if (seconds <= 0) seconds = 10.0;
         return cmd_monitor(path, seconds);
+    }
+    if (strcmp(argv[i], "probe") == 0 || strcmp(argv[i], "calibrate") == 0 ||
+        strcmp(argv[i], "accuracy") == 0) {
+        struct cal_args x = { path, NULL, NULL };
+        const char *output = NULL;
+        int is_acc = (strcmp(argv[i], "accuracy") == 0);
+        if (parse_common(argc, argv, i + 1, &output, &x.cfg, is_acc ? &x.label : NULL) != 0) {
+            usage();
+            return 2;
+        }
+        if (strcmp(argv[i], "probe") == 0)     return with_stimulus(output, run_probe, &x);
+        if (strcmp(argv[i], "calibrate") == 0) return with_stimulus(output, run_calibrate, &x);
+        return with_stimulus(output, run_accuracy, &x);
+    }
+    if (strcmp(argv[i], "apply-saved") == 0) {
+        if (i + 1 != argc) { usage(); return 2; }
+        return gz_cmd_apply_saved(path);
+    }
+    if (strcmp(argv[i], "preview") == 0) {
+        long n = 200;
+        for (int a = i + 1; a < argc; a++) {
+            if (strcmp(argv[a], "--sample") == 0 && a + 1 < argc) {
+                char *end = NULL;
+                n = strtol(argv[++a], &end, 10);
+                if (end == argv[a] || *end != '\0' || n <= 0) {
+                    fprintf(stderr, "--sample wants a positive count\n");
+                    return 2;
+                }
+            } else {
+                usage();
+                return 2;
+            }
+        }
+        return gz_cmd_preview(path, n);
     }
 
     usage();

@@ -137,27 +137,41 @@ static const char *write_tmp(const char *name, const char *text) {
 }
 
 static void test_config_matches_the_shipped_file(void) {
-    /* The real ~/.config/tobii.json, byte for byte, and the origin the daemon
-     * logs from it: "display_area 597x336mm origin=(-299,10) z=0 tilt=0.00".
-     * Anything else here means gaze-cal and the daemon disagree about what the
-     * operator asked for, and the gate would compare against the wrong thing. */
+    /* The real ~/.config/tobii.json as of 2026-07-27, byte for byte, and the
+     * corners the device reads back from it: TL=(-295.2, 338.7, 0),
+     * BL=(-295.2, 5.0, 0). Anything else here means gaze-cal and the daemon
+     * disagree about what the operator asked for, and the gate would compare
+     * against the wrong thing.
+     *
+     * The 597 x 336 in the plan and in CLAUDE.md was never measured: it was
+     * the plan's own example carrying a "MEASURE YOURS" comment. The panel is
+     * an Alienware AW2725DF, 590.42 x 333.72 mm of active area. */
     const char *p = write_tmp("shipped",
         "{\n"
         "  \"display_area\": {\n"
-        "    \"w_mm\": 597,\n"
-        "    \"h_mm\": 336,\n"
+        "    \"w_mm\": 590.42,\n"
+        "    \"h_mm\": 333.72,\n"
         "    \"z_mm\": 0,\n"
         "    \"tilt\": 0,\n"
         "    \"cx\": 0,\n"
-        "    \"cy\": \"b - 10\"\n"
+        "    \"cy\": \"b - 5\"\n"
         "  }\n"
         "}\n");
     struct gz_rect r;
     assert(gz_config_load_rect(p, &r) == 0);
-    assert(r.w_mm == 597 && r.h_mm == 336);
-    assert(r.ox_mm == -298.5);      /* -cx - w/2 */
-    assert(r.oy_mm == 10.0);        /* cy = -168 - 10 = -178, oy = 178 - 168 */
+    assert(r.w_mm == 590.42 && r.h_mm == 333.72);
+    assert(r.ox_mm == -295.21);     /* -cx - w/2 */
+    assert(fabs(r.oy_mm - 5.0) < 1e-9);  /* cy = -166.86 - 5, oy = -cy - h/2 */
     assert(r.z_mm == 0 && r.tilt_deg == 0);
+    unlink(p);
+
+    /* The previous shipped values, kept because the anchor grammar has to give
+     * the same answer whatever the panel is. */
+    p = write_tmp("shipped_old",
+        "{\"display_area\":{\"w_mm\":597,\"h_mm\":336,\"z_mm\":0,\"tilt\":0,"
+        "\"cx\":0,\"cy\":\"b - 10\"}}");
+    assert(gz_config_load_rect(p, &r) == 0);
+    assert(r.ox_mm == -298.5 && r.oy_mm == 10.0);
     unlink(p);
 }
 

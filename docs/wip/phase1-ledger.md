@@ -1195,3 +1195,44 @@ DISPLAY AREA WAS WRONG ALL ALONG, caught immediately before calibration. This is
   THE OFFSET ERROR WOULD HAVE BITTEN IMMEDIATELY TOO: the calibration stimulus window is
   positioned from the X11 offset, and the brief hardcodes +4000+0, so every dot would have
   been drawn 1440 pixels above where the user was looking.
+
+TASK 13 (calibration, blob persistence, the persistence experiment). Code and tests done,
+  the measurements need a human at the hardware and are NOT done.
+DP-1-2 EXISTS. The previous entry says the plan named a monitor that is wrong; it is worse
+  than that. XRRGetScreenResourcesCurrent lists EIGHT connected outputs across two GPUs,
+  and one of them is `DP-1-2 2560x1440+4000+0, 597 x 336 mm`, sitting directly above the
+  gameplay panel in the X layout. So the plan's "DP-1-2, +4000+0, 597 x 336" is not an
+  invention: it is a real, different, physically adjacent monitor whose EDID size is
+  exactly the figure that propagated into CLAUDE.md. `xrandr --query | head -30` hides
+  half the list, which is how it read as nonexistent.
+  CONSEQUENCE: `--output DP-1-2` succeeds and draws a perfectly good calibration on the
+  wrong screen. gaze-cal therefore defaults to the X PRIMARY, prints every connected
+  output it saw with the chosen one marked, and refuses rather than falling back to the
+  root window. The geometry is read from RandR at runtime and never hardcoded.
+  VERIFIED WITHOUT A HUMAN: the stimulus was opened and each of the nine dots read back
+  off the root window with XGetImage. All nine landed on the pixel gz_screen_point_px
+  names, white ring at +6 px, black centre, black background at +60 px, on DP-2 at
+  4256..6304 x 1584..2736.
+THE DAEMON REPLAYS CALIBRATION BY ITSELF, which confounds the naive replug test.
+  applications/tobiifreed/src/main.zig applySavedCalibration() re-applies saved_cal on
+  every reconnect and logs "re-applied N-byte calibration after reconnect". saved_cal is
+  written by cal_apply and is process-local, so a replug measured against a daemon that
+  has calibrated in this session proves the DAEMON replayed, not that the DEVICE
+  remembered. scripts/task13-persistence.sh restarts the daemon first, which empties
+  saved_cal without touching device power, and greps the journal afterwards to prove no
+  replay happened.
+  ALSO: status.calibration_applied is that same process-local flag, not a device readback,
+  so it is not evidence either way.
+FINISH ALREADY APPLIES. tobiifree_core.zig calFinishPollInner is compute_and_apply then
+  retrieve then close_realm, so the device is calibrated when finish_calibration returns.
+  The cal_apply that follows exists to make the DAEMON remember the blob for its own
+  replay and to set calibration_applied. gaze-cal saves the blob to disk BEFORE applying,
+  so a rejected cal_apply cannot lose a calibration the device already holds.
+Z SIGN STILL UNKNOWN, and it is the one thing that must be settled before calibrating.
+  z_mm is 0 in the config while the tracker protrudes about 7.5 mm in front of the screen,
+  so the magnitude is 7.5 and only the sign is open. `gaze-cal probe` settles it from
+  eye_origin_L/R_mm[2], which reads about +600 or about -600 on a seated human: positive
+  means +z points at the user and the screen is at -7.5, negative means the reverse.
+  The same command also settles the normalised gaze frame's y and x direction with four
+  dots, because nothing in this project records it and a mirrored y would train a
+  mirrored calibration that every later measurement would agree with.

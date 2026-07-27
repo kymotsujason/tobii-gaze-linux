@@ -33,9 +33,10 @@ TEST_SRCS="src/proto.c"
 fresh_copy() {
     rm -rf "$WORK/m"; mkdir -p "$WORK/m/src" "$WORK/m/tests"
     cp "$SRC/src/proto.c" "$SRC/src/proto.h" "$SRC/src/client.c" "$SRC/src/client.h" \
-       "$SRC/src/display.c" "$SRC/src/display.h" "$WORK/m/src/"
+       "$SRC/src/display.c" "$SRC/src/display.h" "$SRC/src/calibrate.c" "$SRC/src/calibrate.h" \
+       "$WORK/m/src/"
     cp "$SRC/tests/test_proto.c" "$SRC/tests/test_client.c" "$SRC/tests/test_display.c" \
-       "$WORK/m/tests/"
+       "$SRC/tests/test_calibrate.c" "$WORK/m/tests/"
 }
 
 apply_edit() {
@@ -568,6 +569,144 @@ run_mutation2 "watchdog armed by valid gaze only" \
 # to document that the clamp is defence in depth rather than live logic.
 run_mutation "response length clamp removed (unreachable)" client.c \
     "            if (n > sizeof c->resp) n = sizeof c->resp;" "            ;" ALLOW_SURVIVE
+
+echo
+echo "== calibration mutations =="
+
+TEST_MAIN="tests/test_calibrate.c"
+TEST_SRCS="src/calibrate.c src/display.c src/client.c src/proto.c"
+
+# The stimulus offset. This is the mutation that matters most on this machine:
+# the plan, the brief and CLAUDE.md all name a monitor at +4000+0 while the
+# real one is at +4000+1440, and dropping the offset draws every dot 1440 px
+# from where the eye is looking without any later step being able to tell.
+run_mutation "stimulus ignores the output offset" calibrate.c \
+    "    *px = s->x + (int)lround(fx);
+    *py = s->y + (int)lround(fy);" \
+    "    *px = (int)lround(fx);
+    *py = (int)lround(fy);"
+
+run_mutation "stimulus rounds without the half-pixel" calibrate.c \
+    "    double fx = nx * (double)s->w - 0.5;
+    double fy = ny * (double)s->h - 0.5;" \
+    "    double fx = nx * (double)s->w;
+    double fy = ny * (double)s->h;"
+
+run_mutation "stimulus not clamped to the output" calibrate.c \
+    "    if (fx > (double)(s->w - 1)) fx = (double)(s->w - 1);" "    ;"
+
+run_mutation "NaN falls through the clamp" calibrate.c \
+    "    if (!(fx == fx)) fx = (double)s->w / 2.0;" "    ;"
+
+run_mutation "point grid transposed" calibrate.c \
+    "    {0.1, 0.5}, {0.5, 0.5}, {0.9, 0.5}," "    {0.5, 0.1}, {0.5, 0.5}, {0.5, 0.9},"
+
+# The CRC. A polynomial that only agrees with itself round-trips fine and
+# disagrees with every other reader of the file.
+run_mutation "CRC polynomial changed" calibrate.c \
+    "0xEDB88320u" "0x82F63B78u"
+
+run_mutation "CRC not checked on load" calibrate.c \
+    "    if (got != crc) {" "    if (0) {"
+
+run_mutation "blob magic not checked" calibrate.c \
+    "    if (magic != GZ_BLOB_MAGIC) {" "    if (0) {"
+
+run_mutation "blob format version not checked" calibrate.c \
+    "    if (version != GZ_BLOB_VERSION) {" "    if (0) {"
+
+# Bounded against the caller's buffer instead of the device's 4096-byte
+# out_scratch, which is the one bound that means anything.
+run_mutation "load bound against the buffer, not the device" calibrate.c \
+    "    if (len == 0 || len > GZ_CAL_BLOB_MAX) {
+        fprintf(stderr, \"%s: declares %u bytes, outside 1..%d\\n\", path, len, GZ_CAL_BLOB_MAX);
+        fclose(f);
+        return -1;
+    }" "    ;"
+
+run_mutation "load tolerates a file longer than it declares" calibrate.c \
+    "    if (trailing) {" "    if (0) {"
+
+run_mutation "save bound raised past the device scratch" calibrate.c \
+    "    if (n == 0 || n > GZ_CAL_BLOB_MAX) {
+        fprintf(stderr, \"calibration blob is %zu bytes, outside 1..%d: refusing to save\\n\"," \
+    "    if (0) {
+        fprintf(stderr, \"calibration blob is %zu bytes, outside 1..%d: refusing to save\\n\","
+
+run_mutation "save truncates in place instead of renaming" calibrate.c \
+    "    if (snprintf(tmp, sizeof tmp, \"%s.tmp\", path) >= (int)sizeof tmp) {" \
+    "    if (snprintf(tmp, sizeof tmp, \"%s\", path) >= (int)sizeof tmp) {"
+
+# The sequence.
+run_mutation "finish blob bound removed" calibrate.c \
+    "    if (c->resp_len == 0 || c->resp_len > GZ_CAL_BLOB_MAX) {" "    if (0) {"
+
+run_mutation "an empty finish blob accepted" calibrate.c \
+    "    if (c->resp_len == 0 || c->resp_len > GZ_CAL_BLOB_MAX) {" \
+    "    if (c->resp_len > GZ_CAL_BLOB_MAX) {"
+
+run_mutation "cal_apply length not checked" calibrate.c \
+    "    if (n == 0 || n > GZ_CAL_BLOB_MAX) {
+        say(\"cal_apply refused: %zu bytes is outside 1..%d\\n\", n, GZ_CAL_BLOB_MAX);
+        return -1;
+    }" "    ;"
+
+run_mutation "a failed start still trains the points" calibrate.c \
+    "    if (rc != 0) {
+        say(\"start_calibration failed, nothing was calibrated\\n\");
+        return rc;
+    }" "    ;"
+
+run_mutation "a point is sent even when the dot never appeared" calibrate.c \
+    "            if (stim->show(stim->ctx, nx, ny) != 0) {" "            if (0) {"
+
+run_mutation "the eyes-open gate never fails" calibrate.c \
+    "            if (o->min_valid_frac <= 0 || frac >= o->min_valid_frac) break;" "            break;"
+
+run_mutation "validity divided by every frame, not the inspected ones" calibrate.c \
+    "    return (double)s->n_both / (double)s->n_seen;" \
+    "    return s->n_total ? (double)s->n_both / (double)s->n_total : 0.0;"
+
+run_mutation "one lucky frame passes the eyes-open gate" calibrate.c \
+    "    if (s->n_seen < GZ_CAL_MIN_SEEN) return 0.0;" \
+    "    if (s->n_seen < 1) return 0.0;"
+
+run_mutation "both eyes relaxed to either eye" calibrate.c \
+    "        if (gz_sample_both_eyes_valid(g)) s->n_both++;" \
+    "        s->n_both++;"
+
+# usb_busy is the one retryable code: nothing reached the device, so the
+# connection is still in step. Everything else, and every timeout, is not.
+run_mutation "every error code retried" calibrate.c \
+    "            if (gz_err_retryable(c->err_code) && attempt + 1 < GZ_CAL_RETRIES) {" \
+    "            if (attempt + 1 < GZ_CAL_RETRIES) {"
+
+run_mutation "usb_busy not retried" calibrate.c \
+    "            if (gz_err_retryable(c->err_code) && attempt + 1 < GZ_CAL_RETRIES) {" \
+    "            if (0) {"
+
+run_mutation "a timeout is retried on the same connection" calibrate.c \
+    "            return rc;
+        }
+
+        say(\"  %s: request failed (%d)\\n\", cmd_name(cmd), rc);" \
+    "            continue;
+        }
+
+        say(\"  %s: request failed (%d)\\n\", cmd_name(cmd), rc);"
+
+run_mutation "reconnect skips the status re-gate" calibrate.c \
+    "                } else if (gz_display_gate_status(c, GZ_CLIENT_CMD_TIMEOUT_MS) != 0) {" \
+    "                } else if (0) {"
+
+run_mutation "a repeated frame counter counted twice" calibrate.c \
+    "        if (have_last && g->frame_counter == last_counter) continue;" "        ;"
+
+run_mutation "an unavailable gap reported as zero" calibrate.c \
+    "    if (c->gaze_frames == 0) return -1;" "    if (c->gaze_frames == 0) return 0;"
+
+run_mutation "median taken from the unsorted array" calibrate.c \
+    "    qsort(v, n, sizeof *v, cmp_double);" "    ;"
 
 echo
 echo "killed=$killed  documented_survivors=$documented  unexpected_survivors=$unexpected"
