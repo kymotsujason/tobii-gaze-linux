@@ -1580,3 +1580,20 @@ PHASE 1 NEEDS A TASK THE PLAN NEVER HAD: a host-side gaze correction stage. The 
   fits the overlay's filter constants to it, so recording a trace through an 18 percent gain
   would poison every downstream constant, and the error would look like sensor noise rather
   than a systematic scale.
+FIT ATTEMPT REFUSED, 2026-07-27, and the refusal was CORRECT BEHAVIOUR. Only 6 of 9 points
+  carried both a gaze sample and an eye position, so scripts/fit-correction.sh refused to
+  fit and stored nothing. A fit from a partial sweep encodes WHICH POINTS WERE MISSING
+  rather than the gain, and it would have looked like a successful fit.
+  CAUSE WAS DISTANCE, NOT LIGHTS, despite the script's message blaming lights (the
+  previously-known cause). The raw sweep's eye_mm column reads z 467 to 500 mm, whereas the
+  run that achieved 9 of 9 earlier today was at 586 mm. The whole TOP ROW dropped out, which
+  is the same effect seen at 450 mm during the model discrimination test.
+  THE SCRIPT'S DIAGNOSTIC IS THEREFORE MISLEADING when the real cause is proximity. It
+  should check the eye_mm z against the range where the top row is reachable and say so.
+  Recorded for the Task 13b review.
+STANDING HARDWARE LIMIT, worth keeping: at this user's closest seating positions, roughly
+  450 to 500 mm, the top row of the screen is NOT trackable even with room lights on. At
+  586 mm all nine points resolve. The correction is distance-invariant so fitting at 586
+  still applies when playing closer, but gaze near the top of the screen will drop out when
+  the user leans in, and that is a property of the tracker's cone rather than anything
+  software can fix. Phase 2 must treat gaze dropout as a normal state, not an error.
