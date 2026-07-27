@@ -84,6 +84,10 @@ applies from the pin, then commit the `.patch` to the outer repo.
 **Never `git checkout -- .` inside the submodule between steps** (it restores from the
 index, which `git add -A` has dirtied) and **never commit inside `vendor/`**.
 
+**`build.sh` destroys uncommitted work inside `vendor/`.** Step 1 resets to the pin, so any
+edit not already extracted to a `.patch` is gone. Extract before every run, not after. One
+implementer lost its working tree twice this way.
+
 **Amending an existing patch uses a different command, and getting it wrong silently
 truncates the patch.** Step 4 above stages everything, so a plain `git diff` yields only
 the delta since the last apply. Extract an amendment with `git -C vendor/tobiifree diff
@@ -107,6 +111,10 @@ as the output's `PT_INTERP` and that loader does not search `/usr/lib`:
   `chore:`.
 - `set -euo pipefail` is house style for shell, except where diagnostic greps are expected
   to fail, in which case omit `-e` deliberately and say why.
+- The interactive shell is fish and agent shells are zsh, so `for f in $VAR` does not
+  word-split the way bash would. Script with explicit arrays or `bash -c`.
+- `pkill -f tobiifreed` matches its own command line and kills the shell running it. Use
+  `pgrep -f 'zig-out/bin/tobiifreed'` and kill by PID.
 - **Opus for both implementers and reviewers.** Do not downgrade to dodge a 529, retry or
   verify yourself and say so.
 - **No task closes without a review verdict.** Verifying yourself first is worth doing and
