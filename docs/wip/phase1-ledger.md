@@ -936,3 +936,12 @@ Task 11: FOR TASKS 12 AND 13: gz_client_watchdog_for(c, now_ns, interval_ns) now
   GZ_WATCHDOG_NS for everyone, and must still report each calibration command's park time.
   On GZ_CLIENT_TIMEOUT, reconnect: documented but NEVER ENFORCED, since link_broken is not
   latched, so nothing stops a caller sending the next command.
+Task 11: cleanup verified by controller (commit 1acfd89). All three residual minors closed:
+  adopt's fd<0 arm now calls gz_client_init before setting errno, with the ordering
+  documented; client.h and test_client.c now say 216 with the derivation spelled out (870
+  counts is 217.5 sample intervals and delta/4-1 truncates to 216); and the report now
+  gives 20x against the 100 ms worst case AND 66x against the 30 ms batch figure, each
+  against the regime it belongs to. make check re-run by me: exit 0, killed=57,
+  documented_survivors=3, unexpected_survivors=0.
+Task 11: complete (commits a955357..1acfd89, review APPROVED after one fix round and a
+  verified cleanup)
