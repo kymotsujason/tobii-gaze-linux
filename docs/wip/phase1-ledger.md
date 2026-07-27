@@ -815,3 +815,38 @@ Task 10: FINAL CARRY TO TASK 11: GZ_MAX_PAYLOAD is now 8193 not 65536, so a wire
   GZ_MAX_FRAME (8198); `make check` runs test, test-asan, test-cxx and mutate;
   .DEFAULT_GOAL is still `test` and must be flipped back to $(BUILD)/gaze-cal once main()
   exists.
+Task 11: implemented, commit 7dfac2a, gaze-cal/src/client.{h,c} plus four test files and a
+  minimal src/main.c so .DEFAULT_GOAL could be restored. DONE_WITH_CONCERNS.
+  41 unit + 30 live + 46 proto tests green under gcc/g++ 16.1.1 at -Wall -Wextra -Werror,
+  ASan/UBSan clean, C++ interop links, mutation killed=54 documented_survivors=3
+  unexpected=0.
+  HARDWARE EVIDENCE: an unsubscribed client got 0 gaze frames in 1.5 s while a subscribed
+  one got 51 at 34.0 Hz, which is the subscribe rule demonstrated rather than asserted;
+  daemon killed and restarted mid-stream gave one reconnect with re-subscribe and
+  dropped=0; a 12 s hold_tobii outage was ridden out as STALE with reconnects=0.
+Task 11: TWO DEFECTS THE IMPLEMENTER FOUND IN ITS OWN CODE, both fixed:
+  (1) the watchdog fired on outage silence, so a returning device now re-arms the clock.
+      Found by a real 12 s outage, not by reading.
+  (2) gz_client_connect closed c->fd BEFORE initialising it, so a fresh stack struct could
+      close an unrelated live descriptor. In Plan 2 that descriptor belongs to OBS. connect
+      now never touches a prior fd, and gz_client_reconnect is the call that closes.
+Task 11: THREE MEASURED PROTOCOL FACTS THAT CONTRADICT WHAT I TOLD THE IMPLEMENTER, all
+  sent to the reviewer for independent adjudication:
+  (a) Cmd.disconnect (0xFF) is a NO-OP. The daemon never closes on it: 20 s and 269 KB of
+      gaze arrived after sending it. If true, a client that disconnects politely and waits
+      will hang.
+  (b) frame_counter SURVIVES USB re-enumeration, 500952 -> 500969 across 11 s, so only a
+      daemon restart can reset it and that always forces a reconnect. That would make the
+      carried "reset gap state on reconnect" instruction belt-and-braces rather than
+      load-bearing.
+  (c) COMMAND LATENCY IS 1.8 TO 2.1 ms, NOT THE ~30 ms Tasks 6 and 9 both measured and
+      explained as one gaze interframe at 33.2 Hz. Roughly fifteen times faster. This
+      matters because the daemon's 5 s eof-hold deadline was derived as
+      8 commands x 30 ms x 15 clients = 3600 ms, and Task 13's calibration timing assumes
+      command cost is small against a 1200 ms settle. Both numbers cannot describe the same
+      quantity, and this project treats unsourced numbers as its primary defect class.
+Task 11: nine deviations from the brief, the load-bearing ones being out[4096] is 5 bytes
+  short of a full cal_apply; feed refused large reads as false desyncs; the watchdog comment
+  said "valid gaze", which would reconnect whenever the user merely LOOKED AWAY; no
+  MSG_NOSIGNAL, so a dead daemon would SIGPIPE OBS; and _POSIX_C_SOURCE is required or the
+  brief's own build command fails under -Werror.
