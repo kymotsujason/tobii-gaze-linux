@@ -426,3 +426,42 @@ Task 7: minor M6 (CARRY TO TASK 9): response routing is still keyed on a raw fd.
   narrows the damage from any fd to any live client, but a queue-full disconnect inside a
   command is a NEW way for the fd to close mid-flight, so the recycled-fd window is
   slightly wider than before.
+Task 7: fix round 1/5 (4 addressed, 0 open; commits af11327..7e64687). Re-review verdict
+  ALL FIXES ADDRESSED, no new breakage.
+  I1 RESOLVED BY MEASUREMENT: main.main's frame fell from 0x6020b8 = 6,299,832 bytes to
+  0x2778 = 10,104, and zero 0x3004a8 memcpys remain anywhere in the binary. Controller
+  verified both numbers independently by objdump. Headroom 1.99 MiB -> 8.38 MiB. Fix was
+  Server.init(self: *Server, ...) !void filling the .bss global in place, with fields
+  assigned individually and the client array cleared by a slot loop, so neither a stack
+  temporary nor a 3.1 MB rodata constant is emitted. out stayed at the plan-mandated
+  131072.
+  FIELD AUDIT, the risk of dropping a struct literal: all 8 Server fields confirmed
+  written, and every `try` in init precedes the first field write, so a failing init leaves
+  the global wholly untouched and deinit is registered only after the catch. No
+  partial-construction window.
+  THE 10,104 FIGURE EXPLAINED PROPERLY, and the implementer's own account was wrong. It
+  is not init's locals (path_buf + sockaddr.un is only 622 bytes). It is exactly 4096 + 16:
+  STACK COLORING. loadDisplayArea's short-lived buf: [4096]u8 used to overlap the two dead
+  3.1 MB Server temporaries, whose lifetimes were disjoint from it. Remove the temporaries
+  and it needs its own slot. The old 5,992 residual was 4,096 + 1,896 scalars. Both builds
+  already inlined Server.init and loadDisplayArea into main.
+  Also confirmed: .bss unchanged at 5,355,760 and .rodata FELL 64 bytes, so no 3.1 MB
+  constant was traded for the removed copies.
+Task 7: minor M1 fixed with proto.Err in daemon_protocol.zig (failed = 1, usb_busy = 2).
+  Wire value 1 preserved for every pre-existing failure: the only encodeError call site in
+  the tree is main.zig:292 via sendResult's !ok path, and ws_server.zig emits no error
+  frames at all.
+Task 7: the patch now touches a THIRD file, daemon_protocol.zig. Re-reviewer judged no
+  ordering risk: 0000 touches main/server/core/tracker, 0001 and 0003 touch main.zig only,
+  and nothing else in the series touches daemon_protocol.zig, so 0002's third file lands on
+  pristine pin content. Err also belongs there, beside encodeError and Srv.err.
+Task 7: CARRY TO TASK 11 (client): proto.Err is enum(u32) so the width matches the wire,
+  but nothing exports it, no extern and no generated header, so the C client must duplicate
+  1 and 2 by hand with nothing keeping them in sync. Also, Err is EXHAUSTIVE, so a Zig-side
+  @enumFromInt on a code the daemon adds later panics in safe modes; a trailing `_` would
+  make it a safe decode target.
+Task 7: note: driver/build.zig roots its tests at tobiifree_core.zig and
+  tobiifree_decode.zig, so daemon_protocol.zig is NOT compiled by the 25 driver tests. It
+  compiles only via the daemon build.
+Task 7: complete (commits e93ae62..7e64687, review APPROVED, 1 Important fixed, 1 Important
+  recorded as a plan dependency, 6 minors deferred)
