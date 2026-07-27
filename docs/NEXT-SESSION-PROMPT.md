@@ -20,16 +20,20 @@ correction that is not in the plan. Form H of that correction is shipped and rev
 clean, measuring 37 px at the fitted position, inside the one-degree target, against
 250-285 px raw.
 
-THE ONE THING IN FLIGHT. An agent was implementing FORM S of the correction when the last
-session ended. Spec test 5.3 decided against the head-aware form: with a real 112 mm
-lateral head move, form H measured 69 px and form S 52 px, so the scale centre is not the
-eye. Check these before doing anything, since the work may already be done:
-  .superpowers/sdd/2026-07-26-phase1-bringup-and-daemon/task-13b-formS-summary.md
-  .superpowers/sdd/2026-07-26-phase1-bringup-and-daemon/task-13b-report.md
-  git log, for any commit after bc32a1f
-If form S landed it needs a scoped re-review and then ONE human verify sweep. If it did
-not, re-dispatch from correction-spec.md section 5.6 and the ledger entry headed
-"SPEC TEST 5.3 DECIDED".
+FIRST THING TO DO. Form S of the correction landed at commit f3f61e2 and is UNREVIEWED.
+Spec test 5.3 decided against the head-aware form: with a real 112 mm lateral head move,
+form H measured 69 px and form S 52 px, so the scale centre is not the eye. Form S was then
+refitted and re-scored from the recorded sweeps: verify-normal 33 px, and lateral2 53 px
+held out rather than fitted. Hold-out over 12 ordered pairs gives form S 48 px against form
+H's 52 px. make check exits 0 with 179 killed, 7 documented, 0 unexpected, verified by the
+controller. Read task-13b-formS-summary.md, then dispatch a SCOPED RE-REVIEW of f3f61e2.
+Two things for that reviewer. The existing correction.conf on disk is a form H fit and is
+correctly REFUSED, since reading it as form S would be wrong by about 90 px and would look
+like a working calibration; check the version-then-form locks and GZ_CORR_PARSE_STALE hold.
+And there is one disclosed concern worth judging: a second outlier on the opposite axis can
+be absorbed, dragging gy by 5.7 percent while passing both the outlier rule and isotropy. A
+per-axis rule was tried and measured, and it would have refused the two sweeps that work, so
+the rule was left as specified, pinned by a test, with damage bounded at 20 px median.
 
 THEN. Task 15 records five minutes of real osu and needs the human. It must be recorded
 through a CORRECTED stream. Task 16 refits the overlay's filter constants against it.

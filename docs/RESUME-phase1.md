@@ -68,7 +68,7 @@ A file survives a lost message.
 | 12. Display area readback gate | complete (`d432926..e6dc84a`) |
 | 14. systemd user unit | complete (`ebf87fb..91520cb`), done out of order |
 | 13. Calibration + persistence experiment | ran on hardware; it REVEALED THE DEFECT below rather than completing. Spec section 13 item 2 is not answerable as posed |
-| **13b. Host-side gaze correction** | NEW, not in the plan. Form H shipped and reviewed clean; **form S in flight** |
+| **13b. Host-side gaze correction** | NEW, not in the plan. Form S shipped (`f3f61e2`); **needs a scoped re-review and one human fit** |
 | **15. Trace recorder** | blocked behind 13b, needs five minutes of real osu |
 | 16. Refit filter constants | blocked behind 15, which produces its input |
 
@@ -95,16 +95,20 @@ correction. Measured on hardware:
 | | median error |
 |---|---|
 | raw device output | 250-285 px (5.5 to 6.3 degrees) |
-| form H at the fitted position | **37 px, WITHIN one degree** |
+| form H at the fitted position | 37 px, WITHIN one degree |
 | form H after a real 112 mm head move | 69 px, outside |
-| form S after the same move | **52 px, the form to ship** |
+| **form S, shipped** | verify-normal **33 px**, lateral2 **53 px** held out |
 
 Spec test 5.3 decided against the head-aware form: **the scale centre is not the eye.**
 
 ## What the human still has to do
 
-1. **One verify sweep once form S lands.** Nine dots, no movement, expect the corrected
-   median to beat form H's 69 px at a displaced position.
+1. **Re-fit, because nothing works until you do.** The `correction.conf` on disk holds
+   form H parameters whose offsets are eye-relative, so form S REFUSES it: reading it as
+   form S would be wrong by about 90 px and would look like a working calibration. Run
+   `gaze-cal fit` where you actually sit, then `gaze-cal accuracy --label verify-formS`
+   without moving, expecting 33 to 50 px and WITHIN ONE DEGREE. Re-fit whenever the seat
+   changes for good.
 2. **Task 15**, five minutes of real osu, which is now unblocked once form S is verified.
    It must be recorded through a CORRECTED stream: a trace carrying the 18 percent gain
    would poison every constant Task 16 fits, and would look like sensor noise rather than a
