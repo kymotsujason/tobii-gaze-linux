@@ -1054,3 +1054,48 @@ Task 12: FOR TASK 13, from the re-review: the version-gate invariant lives in th
   at 1.0 mm, which is correct but new. gz_display_read returns -1 for BOTH "did not parse"
   and "reconnected daemon refused", so test != 0 rather than the value. The library caveat
   says "the config" without naming a file; only the CLI prints config: <path>.
+Task 14: review APPROVED, no Critical, no Important, two Minors. Commit ebf87fb, done out
+  of numeric order because Task 13 needs the human and this did not.
+  BOTH DROPS FROM THE BRIEF CONFIRMED CORRECT. ExecStartPost=gaze-cal --apply-saved is
+  IMPOSSIBLE: main.c dispatches only status/display/monitor, saved_cal is a process-local
+  replay buffer at main.zig:53-54, and the daemon's sole openFile is the display-area
+  config, so nothing writes a blob to disk. That line would have failed the unit at EVERY
+  start. The reviewer found the brief carries a SECOND nonexistent invocation as well,
+  `gaze-cal preview --sample 50`, so the substitution was right twice over.
+  Type=exec judged right TODAY but not forever: nothing orders itself After= this unit, and
+  exec catches the realistic failure of 203/EXEC from a missing build. The first unit or
+  ExecStartPost ordered after this one makes Type=notify mandatory.
+  REBUILD SURVIVAL independently confirmed and load-bearing: zig-out/ is ignored by
+  applications/tobiifreed/.gitignore IN THE PINNED TREE d303e47, which is what makes
+  build.sh's `clean -fd` safe, because that clean runs BEFORE the patches. The .in template
+  plus installer is the right shape.
+  Log volume checked at source rather than taken on trust: main.zig:157 logs the first 3
+  then every 500th, so 500/33.2 Hz = 4 lines per minute. Acceptable for a permanent unit.
+Task 14: CONTROLLER RULING on the boot-exit asymmetry: NOT fixing it in the daemon.
+  The asymmetry is real and I confirmed it myself at main.zig:719-737, where both the USB
+  open and the handshake failures are a bare `return` from main, exiting 0, while a
+  mid-flight loss goes through Task 8's backoff loop. The reviewer recommended fixing it
+  (~50 lines, mostly a code move) and its argument was strong: Restart=always costs up to
+  30 s recovery instead of the 2 s first-minute cap, drops every client per cycle because
+  each restart is a new process and a new socket inode, and makes `failed` unreachable so
+  systemd cannot report health.
+  WHAT DECIDED IT: the reviewer also found that fixing the exit ALONE does not let clients
+  connect during a boot absence, because Server.init is at main.zig:753, AFTER the USB
+  open. Client continuity was the strongest argument for the change, and a 50-line patch
+  does not buy it. The full benefit needs a socket-before-device reorder, which is a larger
+  change whose shape should be decided by Phase 2's OBS plugin needs rather than guessed at
+  now. Named hazards if anyone revisits: signal handlers install at main.zig:781 AFTER the
+  USB open, so a retry loop placed before it is not interruptible via `quit`, and moving
+  the install earlier means the handler must tolerate a null server; and Zig defers are
+  scope-bound, so registering them before the loop double-frees.
+  Restart=always stays, which the reviewer confirms is the correct compensation. Recorded
+  in the unit comment and systemd/README.md so it does not read as an oversight.
+Task 14: MACHINE STATE VERIFIED INDEPENDENTLY by the reviewer, which mattered because this
+  task makes a persistent change to the user's machine: unit present and byte-identical to
+  install-systemd.sh --print, is-enabled=disabled, is-active=inactive, NO tobiifreed symlink
+  in graphical-session.target.wants, no tobii process, /run/user/1000/tobiifreed/ empty, the
+  throwaway limitprobe unit gone, no failed user units, and nothing enabled that the user
+  did not ask for. Enable at login with: systemctl --user enable --now tobiifreed
+Task 14: concern 4 DE-RISKED without a logout: `loginctl show-user jason -p Linger` is `no`,
+  so the user manager and every unit under it die at logout regardless, making
+  PartOf=graphical-session.target belt-and-braces rather than load-bearing.
