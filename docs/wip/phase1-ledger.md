@@ -1345,3 +1345,34 @@ CONTROLLER BUG FIX, found while the user sat waiting at an apparently hung scrip
   stderr. Step C's unplug prompt was never affected, being at top level.
   Fix made by the controller rather than the implementer because the user was blocked
   mid-run; flag it to the Task 13 review.
+=== TASK 13 PERSISTENCE EXPERIMENT: THE QUESTION CANNOT BE ANSWERED AS POSED ===
+2026-07-27. Spec section 13 item 2 asks whether calibration survives a power cycle. The
+experiment is INCONCLUSIVE FOR A MORE IMPORTANT REASON: the calibration has NO MEASURABLE
+EFFECT, so there is nothing whose survival could be measured.
+  uncalibrated, lights on, before calibrating : median 250 px, worst 401
+  A calibrated, daemon holds the blob         : median 285 px, worst 393
+  B after a daemon restart                    : median 259 px, worst 379
+  C after a physical power cycle              : median 285 px, worst 371
+  D after apply-saved                         : median 267 px, worst 425
+All five sit in a 250-285 px band. Calibrating made it slightly WORSE, which is noise.
+THE ERROR IS STRUCTURED, NOT RANDOM, which is the useful part. Averaging the A run by row
+and column: target rows are 576 px apart and gaze rows 671; target columns 1024 apart and
+gaze columns 1192. Both axes over-scale by 1.165, ISOTROPICALLY, plus a 203 px vertical
+offset (gaze centre 5276.7,1957 against target centre 5280,2160). So the reported gaze is a
+correctly-shaped but 16.5 percent too large image of the truth, shifted up.
+That is a GEOMETRIC signature, not an uncalibrated eye model, which is consistent with
+nine-point calibration being unable to touch it. Corroborating: tobiifree_core.zig's own
+comment says the onboard calibration applies "a ~1-5mm correction to eye origins", far too
+small to move a 203 px (47 mm) offset.
+ACCURACY IS ALSO FAR OUTSIDE SPEC: 250-285 px at roughly 45 px per degree is about 5.5 to
+6.3 degrees, against spec section 13's one-degree target.
+NOTE the calibration itself looked healthy: nine points at 100 percent both-eyes, a
+1480-byte blob, crc 7b74e8ab, cal_apply accepted in 36.4 ms and again in 8.7 ms from disk.
+So the failure is not in collecting or transporting the calibration.
+DECISIVE TEST PROPOSED, not yet run: apply a DELIBERATELY WRONG calibration, for example
+nine points all reported at the centre, and re-measure. If accuracy is unchanged, the
+calibration path is a no-op on this device and the whole question changes. If accuracy
+collapses, calibration does take effect and the residual is geometric.
+CONTROLLER NOTE: A vs B is also informative. B restarted the daemon so its replay buffer
+was empty and calibration_applied went to 0, yet B measured BETTER than A. The device
+behaves identically whether the daemon believes it is calibrated or not.
