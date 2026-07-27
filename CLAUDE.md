@@ -140,9 +140,21 @@ as the output's `PT_INTERP` and that loader does not search `/usr/lib`:
 
 - `skin/` is 140 files of third-party osu! art and audio, deliberately untracked and
   gitignored. It was only ever reference material for the hue palette.
-- The device stores its display area and keeps it across sessions. It now holds the real
-  **597 x 336 mm**, written during Task 5, reading back as `TL=(-299,346,0)
-  TR=(299,346,0) BL=(-299,10,0)`. Only `w_mm` and `h_mm` are measured; `z_mm`, `tilt`,
+- The device stores its display area across daemon restarts and USB re-enumeration, but
+  **NOT across a power cycle**. Proven by a real unplug on 2026-07-27: the replug logged
+  `replaying display area after reconnect`, and the readback before the replay was
+  **4.0 x 4.0 mm**, `TL=(-2,2,0) TR=(2,2,0) BL=(-2,-2,0)`. So 4x4 mm is the ET5's
+  power-on reset state, which also explains the "unexplained" 4x4 reading seen once during
+  Task 8. It trips `isReset()` (below 50 mm), which is what makes the replay fire.
+  **The replay branch is therefore the critical path, not dead code.**
+- **`setDisplayArea`'s own readback races the write.** In that same replug, the query
+  immediately after the replay still returned 4x4 with an identical payload, so
+  `tracker.display` cached a stale value while the device had already taken the new one.
+  An independent `get_display_area` moments later read the correct 597 x 336. Never trust
+  a readback taken immediately after a write; let it settle, and verify with the client
+  rather than the daemon's own log line.
+- It now holds the real **597 x 336 mm**, written during Task 5, reading back as
+  `TL=(-299,346,0) TR=(299,346,0) BL=(-299,10,0)`. Only `w_mm` and `h_mm` are measured; `z_mm`, `tilt`,
   `cx` and `cy` in `~/.config/tobii.json` are still the daemon's template defaults, and
   Task 13 must measure them before calibration is trusted, because calibration is computed
   in that frame. `isReset()` only fires below 50 mm, so a wrong-but-plausible geometry is

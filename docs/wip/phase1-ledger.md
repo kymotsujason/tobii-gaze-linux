@@ -1109,3 +1109,32 @@ Task 14: complete (commits e6dc84a..91520cb, review APPROVED, two minors cleaned
 Remaining: Task 13 (calibration + persistence experiment) and Task 15 (five minutes of real
   osu to record a trace) both need the user at the hardware, and Task 16 refits the filter
   constants against the trace Task 15 produces, so it is blocked behind 15.
+--- HARDWARE RESULT FROM THE USER, 2026-07-27, replug test item 4 ANSWERED ---
+THE ET5 DOES NOT KEEP ITS GEOMETRY ACROSS A POWER CYCLE. The replug logged
+  "replaying display area after reconnect", so the replay branch is the CRITICAL PATH, not
+  dead code. Recovery took 17 attempts over 27295 ms, and the backoff behaved exactly as
+  Task 8's fix intended (200ms, 400ms, 800ms, then the longer waits), never entering
+  `failed`.
+THE 4x4 mm ANOMALY IS SOLVED, and Task 8's instrumentation is what solved it. The
+  post-replug readback captured:
+    warning(tracker): display area decoded as reset: w=4.0 h=4.0 request_id=4 plen=164
+    payload[0..128]=0000050000000400031f410400000008fffff8000000000004000000080000080000...
+    info(tracker): device display: TL=(-2,2,0) TR=(2,2,0) BL=(-2,-2,0)
+  Decoding by hand confirms it: after the 2-byte prolog, the point3d tag prolog
+  05 00 00 00 04 00 03 1f 41 is followed by Q42 values ff ff f8 00 00 00 00 00 = -2^43,
+  which over 2^42 is -2.0 mm, then +2.0 and 0. So 4x4 mm is simply the ET5's POWER-ON
+  RESET STATE. The single unexplained 4x4 reading during Task 8 was therefore a power
+  event, not corruption, and the reviewer was right that the bytes were a well-formed
+  device response.
+NEW DEFECT FOUND BY THE SAME LOG: setDisplayArea's own readback RACES THE WRITE. The query
+  immediately after the replay (request_id=5) returned 4x4 again with a byte-identical
+  payload, so tracker.display cached a STALE value while the device had already taken the
+  new one. Controller verified moments later with gaze-cal display: the device holds
+  597.0 x 336.0 origin (-298.5, 10.0), gate OK. So the write succeeded and only the
+  immediate readback lied.
+  CONSEQUENCE: never trust a readback taken immediately after a write. This is precisely
+  why Task 12's gate reads the device independently rather than trusting the daemon's log
+  line, and it is why the daemon reported "USB reconnected" as success while its own cache
+  said 4x4. Task 13 must allow settle time after any --force-display-area before gating.
+CLAUDE.md corrected on both counts: geometry survives daemon restarts and USB
+  re-enumeration but NOT power cycles, and the post-write readback is unreliable.
