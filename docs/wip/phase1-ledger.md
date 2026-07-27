@@ -1513,3 +1513,45 @@ A WRONG PREMISE OF MINE HAS BEEN LOAD-BEARING SINCE THE MOUNTING DISCUSSION. I a
   CAUTION, not yet resolved: a tilted screen plane produces a KEYSTONE, which is
   anisotropic, but measured isotropy is 0.9991. So a frame pitch may explain the vertical
   offset without explaining the 1.18 isotropic gain. Sent to the investigator to separate.
+ROUND 4: MY ROTATION HYPOTHESIS IS DEAD, and the critique is the instructive part.
+  ZERO DEGREES OF FREEDOM: one (y,z) pair gives exactly two residuals, and "rotation plus
+  scale" has exactly two parameters, so the fit CANNOT FAIL. Any residual from any cause can
+  be rewritten that way. My arithmetic was confirmed exact (429.75 vs 434.87, ratio 1.0119;
+  24.03 vs 9.34 deg, difference 14.69) and it was still not evidence.
+  THREE INDEPENDENT KILLS from the log:
+  (1) KEYSTONE, which assumes nothing about how the person moved and is therefore weighted
+      highest: if the frame were pitched, the screen IS tilted in tracker space, so
+      horizontal scale must vary by row as S(row) ~ (Ez+7.5)/(Ez - z_row). Across six full
+      sweeps the implied tilt is 2.15 deg, sd 4.78, sem 1.95. A 14.69 deg pitch is 6.4 SIGMA
+      OUT and predicts S_top/S_bot = 1.126 against an observed 1.017.
+  (2) MONOTONICITY: a tilt must give a monotonic top-to-bottom trend, but the MIDDLE row is
+      widest in FIVE OF SIX runs. That is a pincushion, which no tilt of any sign produces.
+  (3) HEAD MOTION: a pitch needs dy/dz = -0.262 as the head moves; observed +0.067 and
+      +0.391 (corr +0.704, n=376), both the WRONG SIGN.
+SIGN CORRECTION TO THE RECORD, and it has been wrong since Task 12: from proto.c:311,
+  tl_z = z_mm + h*sin(a), and +z points at the user, so POSITIVE TILT MEANS THE TOP EDGE
+  LEANS TOWARD THE USER. The Task 12 reviewer's inferred "negative = top toward the user" is
+  BACKWARDS. It was never measured, and it propagated as though it were fact. Corrected here
+  and in CLAUDE.md.
+TILT STAYS 0: 2.15 +/- 1.95 is consistent with zero, per-run values swing -4.15 to +9.19
+  because the pincushion contaminates them, and the keystone it would remove is about 17 px,
+  already inside the 37 px residual. Setting it would bake in a fitted number, which is the
+  failure mode this project keeps hitting.
+THE b MEASUREMENT IS INCONSISTENT WITH THE GAZE DATA, unresolved: device y +70.6 plus
+  b = 170 puts the picture bottom at y = -99.4, but the gaze data needs +55.1. They disagree
+  by 154 mm AND IN SIGN, since -99.4 predicts gaze landing 0.31 too LOW while we measure 0.15
+  too HIGH. Adopting b would roughly TRIPLE the vertical error and reverse it. It gates
+  nothing, because a cy error, a device eye-y bias and a vertical kappa are all additive and
+  absorbed by a fitted intercept. Worth a look at where the tracker physically sits, since
+  DP-2 and DP-1-2 are STACKED panels.
+THE CONCLUSION THAT MATTERS, and it changes Phase 1's scope:
+  Setting tilt and z fixes NOTHING, because neither is meaningfully wrong (tilt 2.15 +/- 1.95
+  against 0; depth term bounded at 10.9 mm, CI -29..+50). The isotropic 1.18 gain and the
+  additive vertical offset ARE fully fixable HOST-SIDE, per frame. The device's eye model is
+  NOT fixable at all: the calibration cannot express a gain and no command exists to make one.
+  So the answer is to CORRECT THE OUTPUT, REFIT PER USER, AND DESIGN AROUND IT.
+  Predicted after a per-frame head-aware correction: 35-50 px median, which is 0.8 to 1.1
+  degrees, inside spec section 13's one-degree target. Above 80 px would falsify it.
+  A homography could go below 37 px later; do not start there.
+ONE MEASUREMENT STILL WANTED, and it is the only one that changes code: the human's TRUE IPD
+  against the device's reported 65.56 mm (sd 0.19).
