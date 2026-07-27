@@ -1,5 +1,5 @@
 diff --git a/applications/tobiifreed/src/main.zig b/applications/tobiifreed/src/main.zig
-index 65c8d69..650c931 100644
+index 65c8d69..42b49e8 100644
 --- a/applications/tobiifreed/src/main.zig
 +++ b/applications/tobiifreed/src/main.zig
 @@ -33,6 +33,19 @@ var server: Server = undefined;
@@ -230,7 +230,7 @@ index 65c8d69..650c931 100644
      }
  
      log.info("shutting down", .{});
-@@ -654,10 +767,99 @@ fn usbThreadFn() void {
+@@ -654,10 +767,149 @@ fn usbThreadFn() void {
          }
          tracker.poll();
          _ = usb_polls.fetchAdd(1, .release);
@@ -242,6 +242,11 @@ index 65c8d69..650c931 100644
      log.info("USB thread stopped", .{});
  }
  
++// Reopen failures are reported for the first few attempts and then once a
++// minute, because an unplugged tracker is a normal state that can last hours.
++const REOPEN_LOUD_ATTEMPTS = 3;
++const REOPEN_QUIET_INTERVAL_MS = 60_000;
++
 +/// Tear the dead USB session down and rebuild it. Runs on the USB thread, which
 +/// owns the transport and the tracker outright while it is in here: the main
 +/// thread refuses commands on device_present, and usbPause cannot succeed
@@ -254,49 +259,94 @@ index 65c8d69..650c931 100644
 +
 +    tracker.deinit();
 +    transport.deinit();
++    log.err("USB connection lost, reopening", .{});
 +
++    const down_since = std.time.milliTimestamp();
++    var attempt: u32 = 0;
 +    var backoff_ms: u64 = 100;
++    var next_quiet_log_ms: i64 = 0;
++
 +    while (!quit) {
-+        log.err("USB fatal, reinitialising in {d}ms", .{backoff_ms});
 +        sleepUntilQuit(backoff_ms);
 +        if (quit) return;
-+        backoff_ms = @min(backoff_ms * 2, 2000);
++        attempt += 1;
 +
-+        transport = LibusbTransport.init() catch continue;
-+        tracker = Tracker.init(.{
-+            .send_fn = &transportSend,
-+            .recv_fn = &transportRecv,
-+            .try_recv_fn = &transportTryRecv,
-+        }) catch {
-+            // Leaving the handle open would make the next open_device fail with
-+            // ClaimInterface against this process's own claim.
-+            transport.deinit();
-+            continue;
++        // Everything that must succeed before the session counts as usable.
++        // Any failure yields a reason and retries, because a half-built session
++        // reported as healthy is worse than staying down: gaze would stream in
++        // an unknown display frame with nothing downstream able to tell.
++        const failure: ?[]const u8 = blk: {
++            transport = LibusbTransport.init() catch |err| break :blk @errorName(err);
++            tracker = Tracker.init(.{
++                .send_fn = &transportSend,
++                .recv_fn = &transportRecv,
++                .try_recv_fn = &transportTryRecv,
++            }) catch |err| {
++                // Leaving the handle open would make the next open_device fail
++                // with ClaimInterface against this process's own claim.
++                transport.deinit();
++                break :blk @errorName(err);
++            };
++            // Tracker.init sets gaze_cb to null, so without this a replug logs
++            // "connected, streaming gaze" and then delivers nothing, forever.
++            tracker.onGaze(onGaze);
++
++            // ExecStartPost does not re-run for an in-process reconnect, so the
++            // geometry is replayed here. Same rule as boot: only write what the
++            // device does not already hold, since calibration is computed in
++            // that frame and a replug that preserved it must not be overwritten
++            // from a config that may be stale.
++            if (force_display_area or tracker.display.isReset()) {
++                log.info("replaying display area after reconnect", .{});
++                if (!tracker.setDisplayArea(display_area)) {
++                    // Boot calls process.exit(1) on this. Mid-flight the
++                    // equivalent is to stay down and keep retrying.
++                    tracker.deinit();
++                    transport.deinit();
++                    break :blk "DisplayAreaReplayFailed";
++                }
++            } else {
++                log.info("device display area preserved across reconnect", .{});
++            }
++            break :blk null;
 +        };
 +
-+        // Tracker.init leaves queryDisplayArea's capture hook installed and
-+        // handshake_init reset the core session, so both hooks have to be put
-+        // back. Without them a replug streams no gaze and drops every routed
-+        // response, while reporting success.
-+        tracker.onGaze(onGaze);
-+        core.set_hooks(null, null, onResponse, null, null);
-+
-+        // ExecStartPost does not re-run for an in-process reconnect, so the
-+        // geometry is replayed here. Same rule as boot: only write what the
-+        // device does not already hold, since calibration is computed in that
-+        // frame and a replug that preserved it must not be overwritten from a
-+        // config that may be stale.
-+        if (force_display_area or tracker.display.isReset()) {
-+            log.info("replaying display area after reconnect", .{});
-+            if (!tracker.setDisplayArea(display_area)) log.err("display area replay failed", .{});
-+        } else {
-+            log.info("device display area preserved across reconnect", .{});
++        if (failure) |reason| {
++            const now = std.time.milliTimestamp();
++            const down_ms = now - down_since;
++            // 2s while a replug is plausibly in progress, then back off hard. A
++            // tracker can sit unplugged for hours, and at the 2s cap that is
++            // 1800 ERROR lines an hour: the flood this patch exists to remove,
++            // merely slowed. Extra reopen latency after an hour is invisible
++            // next to the time it takes to plug a cable in.
++            const cap_ms: u64 = if (down_ms < 60_000) 2_000 else 30_000;
++            backoff_ms = @min(backoff_ms * 2, cap_ms);
++            // Loud while an operator is plausibly watching, then once a minute.
++            if (attempt <= REOPEN_LOUD_ATTEMPTS or now >= next_quiet_log_ms) {
++                log.err("USB reopen attempt {d} failed ({s}), down {d}s, next try in {d}ms", .{
++                    attempt, reason, @divTrunc(down_ms, 1000), backoff_ms,
++                });
++                next_quiet_log_ms = now + REOPEN_QUIET_INTERVAL_MS;
++            }
++            continue;
 +        }
++
++        // After the geometry replay, never before: setDisplayArea calls
++        // queryDisplayArea, which installs its own capture hook and does not put
++        // this one back. Installed first, the replay branch silently swallows
++        // every routed response from here on. Measured on the reversed order,
++        // with --force-display-area so the branch always runs: 70 of 70
++        // commands answered before a reconnect, 0 of 70 after, and the pending
++        // table overflowed 6 times. main() has the same ordering for the same
++        // reason.
++        core.set_hooks(null, null, onResponse, null, null);
 +        applySavedCalibration(); // Task 9
 +
 +        device_present.store(true, .release);
 +        broadcastStatus(); // Task 9
-+        log.info("USB reconnected", .{});
++        log.info("USB reconnected after {d} attempt(s), {d}ms down", .{
++            attempt, std.time.milliTimestamp() - down_since,
++        });
 +        return;
 +    }
 +}

@@ -9,3 +9,6 @@ result
 __pycache__/
 *.pyc
 /skin/
+# Harness binaries built by scripts/daemon-tests/README.md, 2.4 MB each.
+/scripts/daemon-tests/reset_tobii
+/scripts/daemon-tests/hold_tobii

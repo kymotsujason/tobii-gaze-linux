@@ -1,5 +1,5 @@
 diff --git a/driver/src/libusb_transport.zig b/driver/src/libusb_transport.zig
-index 1f4f3eb..7c5581f 100644
+index 1f4f3eb..3d3e20f 100644
 --- a/driver/src/libusb_transport.zig
 +++ b/driver/src/libusb_transport.zig
 @@ -14,6 +14,15 @@ const log = std.log.scoped(.usb);
@@ -59,7 +59,7 @@ index 1f4f3eb..7c5581f 100644
              return false;
          }
          return true;
-@@ -84,23 +111,47 @@ pub const LibusbTransport = struct {
+@@ -84,23 +111,53 @@ pub const LibusbTransport = struct {
      /// The kernel wakes the thread when a USB packet arrives (no polling).
      /// Uses a short timeout so callers can check for shutdown.
      pub fn recv(self: *LibusbTransport, buf: []u8) ?usize {
@@ -106,13 +106,119 @@ index 1f4f3eb..7c5581f 100644
 +        };
 +    }
 +
-+    /// The codes an unplug produces. Everything else libusb can return here is
-+    /// transient (a stall, an interrupted call, a zero-length packet) and must
-+    /// not trigger a reopen, which would drop a working session on a blip.
++    /// The codes an unplug produces, plus the two that return immediately
++    /// instead of consuming the timeout. Anything that returns early and is not
++    /// treated as fatal reproduces the core spin this classification exists to
++    /// remove, so INTERRUPTED and NO_MEM belong here even though neither is
++    /// plausible on this hardware. Everything else (a stall, a zero-length
++    /// packet) is transient and must not trigger a reopen, which would drop a
++    /// working session on a blip.
 +    fn isFatal(r: c_int) bool {
 +        return r == c.LIBUSB_ERROR_IO or
 +            r == c.LIBUSB_ERROR_NO_DEVICE or
-+            r == c.LIBUSB_ERROR_NOT_FOUND;
++            r == c.LIBUSB_ERROR_NOT_FOUND or
++            r == c.LIBUSB_ERROR_INTERRUPTED or
++            r == c.LIBUSB_ERROR_NO_MEM;
      }
  
      pub fn deinit(self: *LibusbTransport) void {
+diff --git a/driver/src/tracker.zig b/driver/src/tracker.zig
+index c1616a5..c1e0ab7 100644
+--- a/driver/src/tracker.zig
++++ b/driver/src/tracker.zig
+@@ -173,14 +173,39 @@ pub const Tracker = struct {
+     // ── Display area query ────────────────────────────────────────────
+ 
+     /// Module-level state for capturing a single response during queryDisplayArea.
+-    var captured_payload: ?[]const u8 = null;
++    ///
++    /// The payload is copied, not aliased. The hook is handed a pointer into the
++    /// core accumulator whose contents are only valid until the next
++    /// feed_usb_in, and drainReads keeps feeding after the capture while
++    /// feed_usb_in compacts acc_buf underneath it. Holding the pointer worked
++    /// only because try_recv_fn times out in 1ms and the next gaze frame is 30ms
++    /// away, so the response happened to be the last feed.
++    var captured_buf: [4096]u8 = undefined;
++    var captured_len: ?usize = null;
+     var captured_request_id: u32 = 0;
+ 
+     fn captureResponse(request_id: u32, payload_ptr: [*]const u8, payload_len: u32) void {
+-        if (request_id == captured_request_id) {
+-            // Store pointer+length; valid until next feed_usb_in.
+-            captured_payload = payload_ptr[0..payload_len];
++        if (request_id != captured_request_id) return;
++        if (payload_len > captured_buf.len) {
++            log.err("display area response {d} exceeds capture buffer {d}", .{ payload_len, captured_buf.len });
++            return;
+         }
++        @memcpy(captured_buf[0..payload_len], payload_ptr[0..payload_len]);
++        captured_len = payload_len;
++    }
++
++    /// Hex for a log line. Hand-rolled so this does not depend on which
++    /// std.fmt slice-hex helper a given Zig 0.15 point release ships.
++    fn hexInto(out: []u8, bytes: []const u8) []const u8 {
++        const digits = "0123456789abcdef";
++        var n: usize = 0;
++        for (bytes) |b| {
++            if (n + 2 > out.len) break;
++            out[n] = digits[b >> 4];
++            out[n + 1] = digits[b & 0x0f];
++            n += 2;
++        }
++        return out[0..n];
+     }
+ 
+     /// Send get_display_area and wait for the response. Returns decoded corners.
+@@ -191,7 +216,7 @@ pub const Tracker = struct {
+ 
+         const req_id = core.request_get_display_area();
+         captured_request_id = req_id;
+-        captured_payload = null;
++        captured_len = null;
+ 
+         const out_len = core.session_out_len_();
+         if (out_len == 0) return null;
+@@ -203,10 +228,11 @@ pub const Tracker = struct {
+         // Wait for response (up to ~20 reads).
+         self.drainReads(20);
+ 
+-        const payload = captured_payload orelse {
++        const n = captured_len orelse {
+             log.warn("queryDisplayArea: no response", .{});
+             return null;
+         };
++        const payload = captured_buf[0..n];
+ 
+         // Decode: 9 x f64 (tl, tr, bl corners).
+         var out: [9]f64 align(8) = undefined;
+@@ -215,11 +241,28 @@ pub const Tracker = struct {
+             return null;
+         }
+ 
+-        return .{
++        const corners = DisplayCorners{
+             .tl_x = out[0], .tl_y = out[1], .tl_z = out[2],
+             .tr_x = out[3], .tr_y = out[4], .tr_z = out[5],
+             .bl_x = out[6], .bl_y = out[7], .bl_z = out[8],
+         };
++
++        // A reset-looking area was observed once from a decode that succeeded,
++        // which means the device really sent those corners: decode_display_area
++        // demands an exact prolog tag, so garbage fails rather than yielding a
++        // clean rectangle. It was never explained. Capture the bytes, because
++        // this branch is also what makes the daemon overwrite device geometry.
++        if (corners.isReset()) {
++            var hex_buf: [256]u8 = undefined;
++            const shown = @min(payload.len, hex_buf.len / 2);
++            log.warn("display area decoded as reset: w={d:.1} h={d:.1} request_id={d} plen={d} payload[0..{d}]={s}", .{
++                @abs(corners.tr_x - corners.tl_x), @abs(corners.tl_y - corners.bl_y),
++                req_id,                            payload.len,
++                shown,                             hexInto(&hex_buf, payload[0..shown]),
++            });
++        }
++
++        return corners;
+     }
+ 
+     // ── Calibration ─────────────────────────────────────────────────

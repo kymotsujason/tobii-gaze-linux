@@ -44,11 +44,29 @@ kernel re-enumerates, the daemon's transfers fail with `LIBUSB_ERROR_NO_DEVICE`,
 and its recovery path runs for real. This is the closest root-free stand-in for
 a replug. It does **not** remove VBUS, so it does not test a power cycle.
 
+**Do not run it while a calibration is in progress.** A re-enumeration in the
+middle of `cal_apply` writing a blob is the one place a reset could plausibly
+damage stored device state. Nothing in the harness writes to the device, but
+this is the exception worth respecting.
+
+**Read the geometry back before and after a session that uses it.** The device
+was once seen reporting a 4x4 mm display area on the start following a session
+containing eight `reset_tobii` runs. Unexplained and never reproduced, but it is
+the one correlation to know about. The `device display: TL=... TR=... BL=...`
+line at daemon start is the check, and it must read
+`TL=(-299,346,0) TR=(299,346,0) BL=(-299,10,0)`.
+
 ## hold_tobii
 
 Claims interface 0 and holds it for N seconds, so the daemon's reopen keeps
 failing and its retry loop and exponential backoff run for a controlled
 duration. Use with `reset_tobii` to simulate a tracker that stays away.
+
+Run it **before** the daemon starts and the daemon's own boot fails with
+`claim_interface failed (device busy?)` and exits. Harmless, but confusing if
+you were not expecting it. Start the daemon first.
+
+The two compiled binaries are gitignored.
 
 ## replug_test.py / outage_test.py
 
