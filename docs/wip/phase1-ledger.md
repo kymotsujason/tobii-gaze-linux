@@ -1423,3 +1423,30 @@ SIDE FINDING CHECKED AND CLEARED BY CONTROLLER: the investigator flagged that ev
   tracker sits on a different panel than the dots. It does not: the user stated the tracker
   is bonded to the AW2725DF, and DP-2 IS the AW2725DF by EDID. Dots and tracker are on the
   same panel.
+MODEL A CONFIRMED, 2026-07-27: the gaze scale error is DISTANCE-DEPENDENT, so it is
+  geometry, not the device's eye model. The user reached 450 mm on the second attempt (the
+  first only reached 580 mm and could not discriminate, since the two models differ by just
+  12 px there against 14 px of noise).
+  Metric is mean gaze x of the right points minus the left, over the MIDDLE AND BOTTOM rows
+  only, because the top row went to NO VALID GAZE at 450 mm as the angle steepened. Target
+  spread 2048 px.
+    eye |z| 598 mm : spread 2393.5, scale 1.1687
+    eye |z| 580 mm : spread 2437.0, scale 1.1899
+    eye |z| 450 mm : spread 2514.0, scale 1.2275
+  An ANGULAR gain is distance-INVARIANT and predicted 2394 at 450 mm; measured 2514, about
+  nine sigma out on the 0.0058 slope noise. Model B is falsified.
+  Solving scale = 1 + delta/D independently per run gives delta = 100.9, 110.2, 102.4 mm,
+  consistent to about 10 percent across a 150 mm change in distance. That is the signature
+  of a fixed depth offset.
+  CAUTION CARRIED FORWARD: delta of about 105 mm is far too large to be explained by a
+  tracker bonded flat to a bezel, which the investigator had already flagged as implausible
+  under model A. So the correction is NOT simply "the screen is 10 cm further back". Sent
+  back for a DERIVED correction, explicitly not a fitted one, with four requirements: work
+  out the physical cause rather than curve-fitting, make it checkable against something
+  physical rather than only against the residual, PREDICT the post-correction median error
+  before we test it so the confirming run can falsify the model, and say whether the
+  calibration must be redone and whether the existing blob must be cleared given there is
+  no cal_clear in the protocol.
+  The 216 px vertical offset is a SEPARATE additive term: isotropy is 0.9991, so whatever
+  causes the scale acts equally on x and y, and the vertical shift does not fall out of it
+  automatically.
