@@ -1630,3 +1630,23 @@ Task 13b: implemented (3b53613), reviewed APPROVED with no Critical and no Impor
   diff, so only the message text changed and the return-1 nothing-written path is untouched.
   make check exit 0, killed=174 documented=7 unexpected=0, up from 169/7/0, five new
   mutations all killed. correction.conf still absent because no fit has yet succeeded.
+FIT REFUSED A SECOND TIME, 2026-07-27, and again the refusal was CORRECT.
+  This time the sweep was COMPLETE, 9 of 9 points, and the fit was numerically GOOD: median
+  residual 7.2 mm (31 px), worst 14.4 mm (62 px), which is BETTER than the predicted 35-50
+  px band. It was refused on the isotropy guard: gx 1.21888 against gy 1.14780, a ratio of
+  1.0619, outside the measured envelope of 0.9991 to 1.0148.
+  LIKELY CAUSE, from the raw block: the eye_mm y column reads 16 to 22 mm, whereas EVERY
+  earlier sweep sat at 42 to 72 mm. The user got the distance right (596 to 653 mm, as
+  asked) but was roughly 30 mm lower than their usual posture, i.e. slouched, and the
+  vertical geometry changed enough to skew the vertical gain relative to the horizontal.
+  WHY REFUSING IS RIGHT: a 31 px residual LOOKS like success, so this is precisely the shape
+  of a plausible wrong answer. The diagnosis established the gain as ISOTROPIC (0.9991
+  across six sweeps), so a fit claiming 6 percent anisotropy is fitting posture artefacts
+  rather than the gain, and it would generalise badly. Shipping it would have written a
+  correction valid for one slouched position, and downstream a wrong correction is
+  indistinguishable from a calibration.
+  THIRD TIME TODAY A REFUSAL HAS BLOCKED A PLAUSIBLE WRONG ANSWER: the partial-sweep refusal
+  earlier, this isotropy refusal, and Task 12's version gate design.
+  WATCH ITEM: if the isotropy guard refuses repeatedly at normal posture, the envelope may
+  be too tight, having been derived from six sweeps at ONE posture, or the isotropy
+  assumption may not hold across eye heights. One more attempt at normal posture first.
