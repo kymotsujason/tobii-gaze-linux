@@ -1450,3 +1450,39 @@ MODEL A CONFIRMED, 2026-07-27: the gaze scale error is DISTANCE-DEPENDENT, so it
   The 216 px vertical offset is a SEPARATE additive term: isotropy is 0.9991, so whatever
   causes the scale acts equally on x and y, and the vertical shift does not fall out of it
   automatically.
+I WAS WRONG ABOUT MODEL A, and the investigator overturned it with better data. Recording
+  the correction because the reasoning error is the useful part.
+  I concluded "geometry" from THREE sweeps. The log holds EIGHTEEN. Three specific errors:
+  (1) the 450 mm run's point 6 reads 6655 against a 6304 target, a 462 px OUTLIER, and that
+  single point anchored my 2514; (2) close-range runs scatter far worse than far ones
+  (sd 0.0261 against 0.0087), so my three-point trend was mostly noise; (3) I used
+  scale = 1 + delta/D, which is first-order, where exact is delta = D(k-1)/k, so my
+  100.9/110.2/102.4 were really 87.4/93.8/84.8.
+  CLEAN COMPARISON over all eighteen: near (n=11, z=479) k=1.1835 against far (n=7, z=596)
+  k=1.1768, a difference of +0.0068 +/- 0.0085, which is 0.8 SIGMA. A 105 mm depth error
+  needs +0.0647, which is 6.8 sigma away. Regressing 1/k on 1/D, a pure depth model requires
+  an intercept of exactly 1.0; observed 0.8649 +/- 0.0654, 4.1 sigma off, implying a gain of
+  1.156 and a delta of only 10.9 mm (CI -29..+50). A 15 mm delta is plausible and would
+  follow from a sign flip on the measured 7.5 mm protrusion; 89 mm is excluded.
+  LESSON, and it is the same one this project keeps relearning: I drew a conclusion from a
+  small sample without checking whether the sample was clean, in a session whose whole
+  theme has been that unverified numbers are the primary defect class.
+TAPE MEASUREMENT, 2026-07-27. Device over 12 s, 376/380 valid frames:
+  left x -14.3 y +72.0 z +430.6, right x +51.1 y +69.2 z +427.4, midpoint x +18.4 y +70.6
+  z +429.1. Human tape: a 400 mm, b 170 mm, c 280 mm.
+  DEPTH IS THE ONLY TRUSTWORTHY ONE and it is genuinely informative. Our model puts the
+  glass at z = -7.5, so the device implies 436.6 mm eye-to-glass against a tape of 400: an
+  over-report of 1.0915. The prediction was ~437 for an angle gain and ~370 for a 1.18
+  distance bias, and 400 sits BETWEEN them. So neither pure model fits: about 9 of the 18
+  percent scale error is a distance bias, leaving roughly 1.08 unexplained.
+  B AND C ARE PROBABLY MIS-ANCHORED, clarification requested, do not build on them.
+  c = 280 mm right of centre is near-impossible: half-width is 295.2, so that would put the
+  eye almost at the right edge, making the left dot column a ~55 degree gaze the tracker
+  could never resolve, yet the left column resolved in most sweeps. 280 is suspiciously near
+  the half-width, so it was probably measured from the LEFT EDGE, which would mean centred
+  and consistent with the device's +18.4.
+  b = 170 mm is almost exactly half the picture height (166.9), i.e. eye level with the
+  vertical centre, which is ergonomically normal, against the device's 65.6 above the
+  picture bottom. They disagree by ~104 mm. I flagged the device's low y as odd early in the
+  session, so the tape may be the correct one here, but the anchor could have been the
+  chassis rather than the lit picture.
