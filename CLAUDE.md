@@ -31,7 +31,11 @@ measurements.
 - OBS 32.1.2. Canvas 2560x1440, output 1920x1080 bicubic, 60 fps, x264 6000 kbps, NV12,
   BT.709 limited. Capture is `xcomposite_input`.
 - nix 2.35.1 with flakes. The store needed `sudo nix-store --init` because Arch's package
-  does not create it. No group membership needed, the daemon socket is `srw-rw-rw-`.
+  does not create it. No group membership is needed, but not for the reason previously
+  recorded here: the daemon never chmods its socket, so the mode comes from the umask and
+  is `srwxr-xr-x`, not `srw-rw-rw-`. Connecting to a unix socket needs write permission, so
+  only the owning user can connect. That is fine for this project, where the daemon, the
+  client and OBS all run as the same user, but Phase 2 must not assume otherwise.
 
 ## Measured facts. Do not re-derive these, and do not trust documents over them
 
