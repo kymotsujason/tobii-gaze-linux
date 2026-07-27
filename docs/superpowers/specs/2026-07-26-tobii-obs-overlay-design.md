@@ -171,7 +171,7 @@ the annulus from a projector's framebuffer would either scale twice or vary per 
 | Fusion, one euro, gap, outlier, offset EMA, sample ring | socket thread, sample rate | nobody directly |
 | Immutable timestamped snapshot (filtered xy, stamps, validity, device flags) | published by socket thread under the mutex | `video_tick` |
 | Opacity envelope, tap selection, quad geometry | `video_tick`, once per frame | `video_render` |
-| Nothing | `video_render` | — it mutates nothing |
+| Nothing | `video_render` | it mutates nothing |
 
 Other constraints, all verified:
 
@@ -181,8 +181,8 @@ Other constraints, all verified:
 - **Clamp the quad to `[0,W]x[0,H]`.** One scene render path clips via `gs_ortho`
   (`obs-scene.c:920-935`) and the direct path does not.
 - **Never assume the incoming blend state.** `gs_blend_state_push()`, then set **both** the
-  factors and the op explicitly — `gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA)` for
-  premultiplied **and** `gs_blend_op(GS_BLEND_OP_ADD)` — then `gs_blend_state_pop()`. The op
+  factors and the op explicitly, `gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA)` for
+  premultiplied **and** `gs_blend_op(GS_BLEND_OP_ADD)`, then `gs_blend_state_pop()`. The op
   matters because OBS's own scene blend tables include `GS_BLEND_OP_MAX` paths
   (`obs-scene.c:116`), so a prior pass can leave MAX set.
 - **sRGB.** Keep `OBS_SOURCE_SRGB` set, but not for the reason revision 2 first gave. It is
@@ -373,8 +373,9 @@ A frozen cloud looks identical to a working one, so every failure must be visibl
 | Daemon alive, device gone | P5 recovers and replays bootstrap. Distinguishable only via the P8 status message, which the protocol does not currently have; without P8 this state is indistinguishable from "connected but idle" |
 
 **The operator cannot see the overlay**, so filter properties are not an adequate channel.
-Provide an always-on indicator outside the program feed — a dock, tray item, or preview-only
-corner HUD — showing connection state, last sample age, device presence, and calibration age.
+Provide an always-on indicator outside the program feed, such as a dock, tray item, or
+preview-only corner HUD, showing connection state, last sample age, device presence, and
+calibration age.
 Plus a kill hotkey and a recalibration hotkey.
 
 ## 12. Verification

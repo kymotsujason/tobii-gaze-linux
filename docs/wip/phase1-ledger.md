@@ -1,17 +1,17 @@
-# SDD ledger — plan: docs/superpowers/plans/2026-07-26-phase1-bringup-and-daemon.md
+# SDD ledger, plan: docs/superpowers/plans/2026-07-26-phase1-bringup-and-daemon.md
 
 Task 1: complete pending review (commit be827e7, branch feat/phase1-bringup)
-Task 1: review found CRITICAL — build.sh `git checkout -- .` restores from INDEX,
+Task 1: review found CRITICAL, build.sh `git checkout -- .` restores from INDEX,
   and the script's own `git add -A` makes the index diverge from HEAD after the first
   patch. Reproduced by controller: re-apply then fails. Fix: `git reset --hard HEAD`.
   Would have first surfaced at Task 5. Root cause: introduced by the plan self-review's
   own fix for the patch-extraction bug.
 Task 1: minor (deferred): .gitignore lacks .direnv/ and OS cruft patterns.
-Task 1: ruling — docs/ and tools/ in the initial commit are CORRECT (controller's
+Task 1: ruling, docs/ and tools/ in the initial commit are CORRECT (controller's
   out-of-band instruction; they predate Task 1). Not scope creep.
-Task 1: ruling — check-device.sh finding DISMISSED; controller's review brief wrongly
+Task 1: ruling, check-device.sh finding DISMISSED; controller's review brief wrongly
   named a Task 2 file. Not an implementer defect.
-Task 1: fix round 1/5 (commits bfb929d, 90130f2) — reset --hard HEAD replaces
+Task 1: fix round 1/5 (commits bfb929d, 90130f2), reset --hard HEAD replaces
   index-relative checkout; clean -fd not -fdx (controller correction mid-round,
   -fdx destroyed the zig cache every run); submodule-init guard; skin/ gitignored.
 SPIKE RESULT (Task 3 question, answered early): ET5 streams gaze on Linux with NO
@@ -30,10 +30,10 @@ EXPERIMENT (controller, reverted): subscribe payload bytes 6 and 15 are both 0x0
   subscription. CONCLUSION: 33 Hz is the delivered rate. Unlocking 133 Hz would need
   the 20-byte payload decoded properly (only stream_id at bytes 9..10 is understood).
   Out of scope for Phase 1; record as possible future upside.
-Task 1: re-review (Opus) — all 5 round-1 findings ADDRESSED and independently
+Task 1: re-review (Opus), all 5 round-1 findings ADDRESSED and independently
   reproduced (bug and fix both). Evidence judged sound: the throwaway-patch test does
   exercise the staged-index failure path.
-Task 1: fix round 2/5 dispatched — IMPORTANT: reset --hard HEAD uses the submodule's
+Task 1: fix round 2/5 dispatched, IMPORTANT: reset --hard HEAD uses the submodule's
   own HEAD, not the outer gitlink. Controller reproduced silent wrong-base build.
   Opus found the likely trigger: build.sh's own `git add -A` leaves the submodule index
   staged, so one stray commit inside vendor/ bakes patches into HEAD, and build.sh's

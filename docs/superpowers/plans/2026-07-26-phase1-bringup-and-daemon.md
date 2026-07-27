@@ -224,7 +224,7 @@ git commit -m "feat: udev rule installer and device access check"
 
 ---
 
-## Task 3: THE SPIKE — prove gaze streams at all
+## Task 3: THE SPIKE, prove gaze streams at all
 
 **Files:**
 - Create: `scripts/spike-first-sample.sh`
@@ -308,7 +308,7 @@ git commit -m "feat: bring-up spike, gaze confirmed streaming on Linux"
 
 ---
 
-## Task 4: P7 — enlarge the calibration buffers
+## Task 4: P7, enlarge the calibration buffers
 
 **Files:**
 - Create: `patches/0000-calibration-buffers.patch`
@@ -396,7 +396,7 @@ git commit -m "fix: enlarge calibration buffers (P7), 512B session_out overflowe
 
 ---
 
-## Task 5: P4 — force the display area
+## Task 5: P4, force the display area
 
 **Files:**
 - Create: `patches/0003-force-display-area.patch`
@@ -459,7 +459,7 @@ git commit -m "fix: add --force-display-area (P4), stale geometry was unfixable"
 
 ---
 
-## Task 6: P1 — single owner for the USB transport
+## Task 6: P1, single owner for the USB transport
 
 **Files:**
 - Create: `patches/0001-single-usb-owner.patch`
@@ -552,7 +552,7 @@ git commit -m "fix: pause USB thread around all forwarded commands (P1)"
 
 ---
 
-## Task 7: P2+P3 — one write path for every socket write
+## Task 7: P2+P3, one write path for every socket write
 
 **Files:**
 - Create: `patches/0002-write-path.patch`
@@ -659,7 +659,7 @@ git commit -m "fix: single queued write path, no EAGAIN disconnect, no partial f
 
 ---
 
-## Task 8: P6 and P5 — real poll loop and unplug recovery
+## Task 8: P6 and P5, real poll loop and unplug recovery
 
 **Files:**
 - Create: `patches/0005-poll-loop.patch`, `patches/0004-unplug-recovery.patch`
@@ -768,7 +768,7 @@ git commit -m "fix: poll-driven main loop and USB unplug recovery with bootstrap
 
 ---
 
-## Task 9: P8 and P9 — device status message and pending-entry lifetime
+## Task 9: P8 and P9, device status message and pending-entry lifetime
 
 **Files:**
 - Create: `patches/0007-device-status-message.patch`, `patches/0008-pending-entry-lifetime.patch`
@@ -1163,7 +1163,7 @@ void   gz_client_close(struct gz_client *c);
 ```
 
 ```c
-/* gaze-cal/src/client.c  (核 excerpt: init, feed, watchdog) */
+/* gaze-cal/src/client.c  (excerpt: init, feed, watchdog) */
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
@@ -1469,7 +1469,7 @@ Run: `./gaze-cal/build/gaze-cal calibrate`
 Then: `./gaze-cal/build/gaze-cal preview` and look at each of the nine points in turn.
 Expected: the reported gaze lands within roughly 45 px (one degree) of each point. Larger error means the display area is wrong, not the calibration.
 
-- [ ] **Step 5: THE PERSISTENCE EXPERIMENT — resolves spec section 13 item 2**
+- [ ] **Step 5: THE PERSISTENCE EXPERIMENT, resolves spec section 13 item 2**
 
 ```bash
 ./gaze-cal/build/gaze-cal preview --sample 200 > /tmp/before.txt   # look at screen centre
