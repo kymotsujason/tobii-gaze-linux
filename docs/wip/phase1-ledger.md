@@ -900,3 +900,39 @@ Task 11: for Tasks 12 and 13, from the reviewer: use gz_client_request, one comm
   the get_display_area reply is 164 body bytes and is NOT doubles at offset 0, confirmed
   again by a naive decode printing garbage, so the Q42 TLV reader is mandatory; and
   `dropped` is per-connection by design, so never compare it across a reconnect.
+Task 11: fix round 1/5 (6 addressed, 0 open; commits 7dfac2a..35f200d). Re-review verdict
+  ALL FIXES ADDRESSED, no new breakage, make check re-run by the reviewer: exit 0,
+  killed=56 documented_survivors=3 unexpected_survivors=0, matching the claim exactly.
+  Fix 1 verified on the PRODUCTION path rather than a mock: 2000 connects against a server
+  that accepts then closes, mirroring server.zig:211-213, gave 831 EPIPE failures with
+  live_fd_on_fail=0 and fds 7 -> 7, and 3000-iteration loops over failed adopt, connect and
+  reconnect are flat under ASan+LSan.
+  Fix 2 verified by a 5096-state exhaustive sweep: gz_client_watchdog(c,t) is identical to
+  gz_client_watchdog_for(c,t,GZ_WATCHDOG_NS) with 0 mismatches, the boundary still holds at
+  exactly GZ_WATCHDOG_NS with RECONNECT at +1, and a caller's 4 s interval gives the same
+  answer before and after a full re-init.
+  DESIGN CALL ENDORSED, parameter over struct field: gz_client_init memsets and both connect
+  and adopt call it unconditionally, so a field would be ZEROED on every reconnect, and zero
+  is worse than the default because interval 0 fires on any silence at all. Having init
+  restore the default instead would override a caller's choice at the least visible moment,
+  during recovery, which is exactly when a longer interval matters most. A parameter has no
+  state to revert.
+Task 11: THREE RESIDUAL MINORS found by the re-review, cleanup dispatched rather than
+  deferred, because two of them are wrong NUMBERS in a header that Tasks 12 and 13 will read:
+  (1) client.c:51's `fd < 0` arm returns WITHOUT gz_client_init, so c->fd keeps the caller's
+      prior value. Probed: a struct memset to 0xAB with fd=999 gives adopt(&c,-1) returning
+      -1 with c.fd=999. Same contract bug as the one just fixed, one seam over. Unreachable
+      in tree today, but adopt is a public seam.
+  (2) gz_frames_dropped(530932, 531802) returns 216, not the 217 asserted in client.h:123
+      and test_client.c, because proto.c:152 is delta/4 - 1.
+  (3) the report says 100 ms is the worst case and then that "2 s is roughly 66x the real
+      worst case". 2000/30 = 66.7 and 2000/100 = 20, so 66x is the BATCH figure.
+Task 11: FOR TASK 13, and it would silently corrupt a gap check: frame_counter is NOT
+  congruent mod 4 across a reconnect. 531802 - 530932 = 870, not a multiple of 4, so a
+  daemon restart shifts the phase. Any code asserting (b - a) % 4 == 0 across a reconnect is
+  wrong. gz_frames_dropped already truncates, so nothing is broken today.
+Task 11: FOR TASKS 12 AND 13: gz_client_watchdog_for(c, now_ns, interval_ns) now exists, so
+  Task 13 should pass its own interval while an overlay is subscribed rather than raise
+  GZ_WATCHDOG_NS for everyone, and must still report each calibration command's park time.
+  On GZ_CLIENT_TIMEOUT, reconnect: documented but NEVER ENFORCED, since link_broken is not
+  latched, so nothing stops a caller sending the next command.
