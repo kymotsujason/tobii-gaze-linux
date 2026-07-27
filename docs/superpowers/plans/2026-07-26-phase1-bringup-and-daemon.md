@@ -478,6 +478,25 @@ git commit -m "fix: add --force-display-area (P4), stale geometry was unfixable"
 
 `usbThreadFn` loops `tracker.poll()` forever while the main thread reaches `drainReads` then `recv` then `core.feed_usb_in` (`tracker.zig:288,294`). Two threads, one bulk endpoint, one set of global protocol state, no mutex. Pausing around only the three state machines is insufficient: `get_display_area`, both setters and `add_calibration_point` mutate the same globals (`main.zig:184-203`), and the pending routing entry is installed *after* the send (`:193-195`), so the USB thread can consume the response first.
 
+**CORRECTED AFTER MEASUREMENT.** The handshake below, as originally written, is a
+**regression**, not a smaller improvement. `usbResume` cleared only the request flag, so a
+command issued inside the USB thread's 0.2 ms parking sleep read a leftover `usb_paused`
+of true, took that ack, and re-parked the thread before it ever reached `tracker.poll()`.
+Because that thread is the only reader of the IN endpoint, a pipelining client starved it
+completely. Measured on real hardware: the unpatched binary served 4000 of 4000 commands,
+while this handshake served 200 of 4199 and logged 3935 `pending table full`. The 10 ms
+spaced test in Step 4 cannot see it, because the main thread is idle for 10 ms out of
+every 10.03 ms and the USB thread always gets its turn.
+
+The fix is a **poll progress gate**: before requesting a pause, wait until a poll counter
+bumped by the USB thread has moved past the value captured at the last resume. That proves
+the reader got a real turn rather than merely observing a flag transition, and it
+establishes a happens-before edge, so `usb_paused` can only become true again through a
+fresh entry into the parking branch. Also gate both waits on a `usb_running` flag cleared
+when the USB thread exits, or a SIGTERM with commands queued burns both spin budgets per
+queued command. See `patches/0001-single-usb-owner.patch` for the shipped version, whose
+`usbPause` doc comment carries the full rationale.
+
 - [ ] **Step 1: Add a pause-and-ack handshake**
 
 ```zig

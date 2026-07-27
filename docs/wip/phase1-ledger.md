@@ -293,3 +293,75 @@ Task 5: doc re-review verdict = ALL REQUIRED ITEMS ADDRESSED. It verified the an
     invisible exactly where it mattered. FIXED: the plan's Task 13 now opens with an
     explicit PRECONDITION block naming what to measure, saying to apply it with
     --force-display-area, and stating that gz_display_verify cannot catch this.
+Task 6: complete (commit 5f20579, patches/0001-single-usb-owner.patch, review APPROVED).
+  Spec compliance FULLY COMPLIANT, five of five steps, one necessary deviation.
+  PLAN DEFECT, the significant finding of this task: the plan's own handshake code is a
+  REGRESSION, not a weaker fix. usbResume cleared only the request flag, so a command
+  issued inside the USB thread's 0.2 ms parking sleep read a leftover usb_paused of true,
+  took that ack, and re-parked the thread before it ever reached tracker.poll(). That
+  thread is the only reader of the IN endpoint, so a pipelining client starved it and no
+  response was ever consumed. MEASURED on hardware, three log files:
+    pre-burst.log  unpatched binary        4000 of 4000 served
+    post.log       plan's handshake        4199 forwarded, 200 routed, 3935 table full
+    accept.log     shipped fix             1232 forwarded, 1232 routed, 0 warnings/errors
+  The plan's own Step 4 test at 10 ms spacing cannot see it, because the main thread idles
+  for 10 ms of every 10.03 ms and the USB thread always gets a turn.
+  FIX: a poll progress gate. usbPause waits until usb_polls has moved past the value
+  captured at the last resume, which proves the reader took a real turn instead of merely
+  observing a flag transition. The reviewer established this as a happens-before edge, not
+  a narrowed window: reaching fetchAdd requires first executing usb_paused.store(false),
+  and usbPause's acquire load synchronises with that release, so usb_paused can only
+  become true again through a fresh entry into the parking branch. Instrumentation over
+  5160 recorded pauses: stale_ack true ZERO times, spins==0 ZERO times. The implementer
+  reported 400 pauses and understated its own evidence by an order of magnitude.
+  Plan text corrected so nobody ships the original.
+  Reviewer confirmed independently: all seven forwardable commands are inside the paused
+  region and subscribe/disconnect are filtered ahead of it; defer usbResume cannot be
+  skipped since every post-pause return is a plain return with no process.exit on the
+  path; addPending now precedes transport.send with takePending on send failure, and
+  request_id comes from the core's monotonic takeReqId which never returns 0, so the
+  failure branch cannot evict another client's entry; every store is .release and every
+  load .acquire, including the reverse edge that publishes the main thread's command-time
+  writes before polling resumes; deadlock is structurally impossible because nothing the
+  USB thread does waits on the main thread.
+  RACE NOT REPRODUCED, and the implementer said so plainly. Reviewer accepted the fix
+  anyway on two grounds: the calibration half is not a narrow window at all, since
+  driveStateMachine runs drainReads on the main thread for the whole command while the USB
+  thread polls, both feeding one accumulator; and the request/response half is
+  unsynchronised access to two tables from two threads, which is undefined behaviour
+  whether or not the window is hit on this hardware.
+Task 6: IMPORTANT I1, deferred to TASK 7 by the reviewer's own scoping. A failed pause is
+  advisory: when either budget is exhausted usbPause logs and returns, and the caller
+  proceeds as if it owned the endpoint. Harmless for get_display_area, but for
+  start_calibration/finish_calibration/cal_apply it means a calibration blob assembled
+  from an interleaved accumulator, and Task 13 writes those blobs to the device. Fix is to
+  have usbPause return a bool and let the three state-machine branches refuse.
+Task 6: IMPORTANT I2, MUST land in TASK 8's brief. Per-command latency is now ~30 ms, one
+  gaze interframe, because the pause waits for a real poll boundary. readCommands
+  dispatches a whole buffer fill before returning, so drainGaze does not run for the whole
+  batch. The gaze ring is 64 entries, about 2 s at 33.2 Hz, so a batch over ~70 commands
+  wraps the ring and drainGaze then reads slots the USB thread already overwrote. The
+  flush that follows writes the backlog to every subscriber at once, and broadcastGaze
+  calls removeClient on ANY write error including error.WouldBlock, disconnecting a
+  healthy client. Reproduced three times. Before this patch a 500-command batch took
+  100 ms and could not overflow a 2 s ring, so this patch made it reachable.
+  NOTE: the EAGAIN half is Task 7's Produces line; the ring overflow is Task 8.
+Task 6: minor M1 (fold into Task 7 with I1): usbResume captures the poll counter BEFORE
+  clearing the request flag, which is exact only when the preceding pause was acked. After
+  a budget exhaustion the thread is still running and can bump usb_polls between those two
+  lines. Precondition is an already-logged failure, so no new harm. One line: skip the
+  capture, or use usb_polls -% 1, when the pause was not acked.
+Task 6: minor M2 (fold into Task 7): the usbPause doc comment says a worst-case poll is
+  ~101 ms. The drain loop runs up to seven tryRecv calls, so the true bound is ~107 ms.
+  Conclusion unaffected, the budget is still 9x the bound, measured max was 121 of 5000.
+Task 6: minor M3 (noted only): usb_polls is a u32 compared for equality, wrapping after
+  about four years at 33.2 Hz.
+Task 6: CARRY TO TASK 9: the core's own pending table silently evicts slot 0 on overflow
+  (tobiifree_core.zig:1056-1066, MAX_PENDING = 32, no log line). The progress gate keeps at
+  most one request outstanding so forwardCommand cannot reach it today, but Task 9's
+  pending-entry lifetime work needs to know.
+Task 6: UNEXPLAINED, by implementer and reviewer both: two clients pipelining 500 commands
+  each is not reliably serviced, one client sometimes getting only its first 32 commands
+  read. One run completed 1000 of 1000 in 30.6 s, so it is a servicing delay, not a hang.
+  Pause and routing logic is NOT implicated: forwarded equalled routed in every run,
+  cumulative 1232 of 1232, zero table overflows. Task 8 should look.
