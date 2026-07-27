@@ -1,0 +1,49 @@
+[Unit]
+Description=Tobii ET5 gaze daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+# The RestartSec backoff below already outruns the default 5-starts-in-10s
+# limiter, so this is here for the operator: measured, the fifth `systemctl
+# --user restart` inside 10 s latches a default unit into start-limit-hit and
+# only `reset-failed` clears it. Rebuild-and-restart cycles hit that.
+StartLimitIntervalSec=0
+
+[Service]
+# exec, not simple: start fails if the binary is missing or not executable.
+# Not notify, which would need an sd_notify call the daemon does not have, and
+# nothing downstream consumes readiness yet. The socket appears 59 to 71 ms
+# after `systemctl start` returns, so a script that connects immediately after
+# starting the unit must retry.
+Type=exec
+ExecStart=@TOBIIFREED_BIN@
+
+# always, not on-failure: a boot that cannot open the tracker exits 0, so
+# on-failure never fires and the unit would sit inactive with the tracker
+# unclaimed. This cannot cut a healthy session short, because a daemon that
+# loses the device mid-flight reconnects in process and never exits, and
+# Restart= only fires on exit. The backoff mirrors the daemon's own reconnect
+# policy, which likewise settles at 30 s. Measured delays between reopen
+# attempts: 2.25, 3.5, 6.0, 10.25, 17.5, then 30 s. Worst case that is 30 s
+# from a tracker becoming available to gaze flowing again.
+Restart=always
+RestartSec=2
+RestartSteps=5
+RestartMaxDelaySec=30
+
+# Shutdown is a signal handler, a thread join and an unlink, measured at 5 to
+# 54 ms. Ten seconds is generous for that and keeps a wedged libusb call from
+# holding session logout for the 90 s default.
+TimeoutStopSec=10
+
+# The USB thread's duty cycle is under 1%, so this buys tail latency against
+# osu! without needing CAP_SYS_NICE: /etc/security/limits.conf grants jason
+# nice -10. No CPU affinity, since osu!'s is unknown.
+Nice=-5
+
+# The daemon needs no privileges. Filesystem sandboxing is deliberately absent:
+# it needs /dev/bus/usb, and the binary's PT_INTERP and libusb both live in
+# /nix/store, so ProtectSystem or PrivateDevices would break exec outright.
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=graphical-session.target
