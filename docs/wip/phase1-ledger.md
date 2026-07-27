@@ -1236,3 +1236,37 @@ Z SIGN STILL UNKNOWN, and it is the one thing that must be settled before calibr
   The same command also settles the normalised gaze frame's y and x direction with four
   dots, because nothing in this project records it and a mirrored y would train a
   mirrored calibration that every later measurement would agree with.
+CORRECTION TO MY OWN CORRECTION, and the real story is more coherent. I claimed DP-1-2 does
+  not exist, based on `xrandr | grep connected | head -4`. THE head -4 TRUNCATED IT. There
+  are EIGHT connected outputs across two GPUs, and DP-1-2 is real: 2560x1440+4000+0,
+  597 x 336 mm, sitting DIRECTLY ABOVE the gameplay monitor.
+  So the plan's three values were mutually CONSISTENT and described a REAL monitor, just
+  the wrong one. That is a far easier mistake to make than a wrong number, and much harder
+  to notice, because nothing about "DP-1-2, +4000+0, 597x336" is internally suspicious.
+  The operative facts stand: the tracker is on DP-2 at +4000+1440, 590.42 x 333.72 mm, and
+  the config and device now match that. CLAUDE.md corrected.
+Task 13: implemented, commit 3c5ebaa, code and tests DONE and VERIFIED, measurements NOT
+  done because every one of them needs a human. Nothing written to the device.
+  make check green: test_proto, test_client, test_display and test_calibrate pass plain and
+  under ASan+UBSan, C++ interop links, mutations killed 134 / documented 5 / unexpected 0,
+  of which 29 are new, and FIVE began as unexpected survivors and were all killed by adding
+  tests rather than by documenting them away.
+  VERIFIED ON HARDWARE WITHOUT EYES, which is the right amount of verification for a task
+  whose data needs a person: all nine dots were read back off the root window with
+  XGetImage and landed on the pixel the code names, on DP-2 at +4000+1440. gaze-cal now
+  defaults to the X primary, prints every output, and refuses to guess.
+Task 13: THREE CORRECTIONS FROM THE IMPLEMENTER THAT CHANGE THE EXPERIMENT.
+  (1) THE DAEMON REPLAYS CALIBRATION BY ITSELF ON RECONNECT. So the brief's replug test
+      would have proved only that the DAEMON replayed, not that the DEVICE remembered, and
+      would have answered the wrong question entirely. scripts/task13-persistence.sh
+      restarts the daemon FIRST to empty saved_cal.
+  (2) finish_calibration IS compute_and_apply: the device is already calibrated when it
+      returns, and the cal_apply afterwards only makes the DAEMON remember the blob. The
+      blob is saved to disk BEFORE it is applied.
+  (3) `accuracy` measures the nine TRAINED points, so it is fit quality rather than
+      generalisation. Correct for the persistence comparison, wrong for any headline
+      accuracy claim, and the implementer said so rather than letting it be misread.
+Task 13: awaiting the human. Four steps relayed: probe (settles the z sign), accuracy
+  --label uncalibrated (the before picture), calibrate, then the persistence script with a
+  REAL cable pull. Step 1 gates step 3: the z sign must be settled before calibrating,
+  because calibration is computed in the display-area frame.
