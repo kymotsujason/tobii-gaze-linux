@@ -1,0 +1,118 @@
+diff --git a/driver/src/libusb_transport.zig b/driver/src/libusb_transport.zig
+index 1f4f3eb..7c5581f 100644
+--- a/driver/src/libusb_transport.zig
++++ b/driver/src/libusb_transport.zig
+@@ -14,6 +14,15 @@ const log = std.log.scoped(.usb);
+ pub const LibusbTransport = struct {
+     usb_ctx: ?*c.libusb_context,
+     usb_handle: ?*c.libusb_device_handle,
++    /// Sticky: set by any transfer that classified `.fatal`, cleared only by a
++    /// successful init. RecvFn is `?usize`, so the classification cannot reach
++    /// the caller through the Tracker boundary; this flag is how it gets there.
++    ///
++    /// Plain bool rather than an atomic because only the endpoint owner touches
++    /// it: the USB thread, or the main thread while that thread is parked. The
++    /// pause handshake is a release/acquire pair on usb_pause_req, so a write
++    /// made under a pause is published to the USB thread when it resumes.
++    fatal: bool,
+ 
+     const VID: u16 = 0x2104;
+     const PID: u16 = 0x0313;
+@@ -27,10 +36,21 @@ pub const LibusbTransport = struct {
+         SessionOpen,
+     };
+ 
++    /// Outcome of a bulk IN transfer. Collapsing every failure to null made an
++    /// unplug indistinguishable from an idle device, and LIBUSB_ERROR_NO_DEVICE
++    /// returns immediately instead of consuming the timeout, so the reader spun
++    /// a core for as long as the tracker was gone.
++    pub const RecvResult = union(enum) {
++        data: usize,
++        timeout,
++        fatal,
++    };
++
+     pub fn init() Error!LibusbTransport {
+         var self = LibusbTransport{
+             .usb_ctx = null,
+             .usb_handle = null,
++            .fatal = false,
+         };
+ 
+         if (c.libusb_init(&self.usb_ctx) != 0) {
+@@ -71,10 +91,17 @@ pub const LibusbTransport = struct {
+     }
+ 
+     pub fn send(self: *LibusbTransport, data: []const u8) bool {
++        // A reopen that failed leaves the handle null, and libusb_bulk_transfer
++        // dereferences it without checking.
++        const h = self.usb_handle orelse {
++            self.fatal = true;
++            return false;
++        };
+         var transferred: c_int = 0;
+-        const r = c.libusb_bulk_transfer(self.usb_handle, EP_OUT, @constCast(data.ptr), @intCast(data.len), &transferred, 1000);
++        const r = c.libusb_bulk_transfer(h, EP_OUT, @constCast(data.ptr), @intCast(data.len), &transferred, 1000);
+         if (r != 0 or transferred != @as(c_int, @intCast(data.len))) {
+             log.err("send failed: r={d} transferred={d}/{d}", .{ r, transferred, data.len });
++            if (isFatal(r)) self.fatal = true;
+             return false;
+         }
+         return true;
+@@ -84,23 +111,47 @@ pub const LibusbTransport = struct {
+     /// The kernel wakes the thread when a USB packet arrives (no polling).
+     /// Uses a short timeout so callers can check for shutdown.
+     pub fn recv(self: *LibusbTransport, buf: []u8) ?usize {
+-        return self.recvTimeout(buf, 100);
++        return bytesOf(self.recvTimeout(buf, 100));
+     }
+ 
+     /// Non-blocking receive — returns immediately if no data is available.
+     pub fn tryRecv(self: *LibusbTransport, buf: []u8) ?usize {
+-        return self.recvTimeout(buf, 1);
++        return bytesOf(self.recvTimeout(buf, 1));
+     }
+ 
+-    fn recvTimeout(self: *LibusbTransport, buf: []u8, timeout_ms: c_uint) ?usize {
++    /// Classified receive. Prefer this over recv/tryRecv where the caller can
++    /// act on the distinction; check `fatal` where it cannot.
++    pub fn recvTimeout(self: *LibusbTransport, buf: []u8, timeout_ms: c_uint) RecvResult {
++        const h = self.usb_handle orelse return .fatal;
+         var transferred: c_int = 0;
+-        const r = c.libusb_bulk_transfer(self.usb_handle, EP_IN, buf.ptr, @intCast(buf.len), &transferred, timeout_ms);
+-        if (r == 0 and transferred > 0) return @intCast(transferred);
+-        // LIBUSB_ERROR_TIMEOUT (-7) is expected, not an error.
+-        if (r != 0 and r != -7) {
+-            log.debug("recv error: {d}", .{r});
++        const r = c.libusb_bulk_transfer(h, EP_IN, buf.ptr, @intCast(buf.len), &transferred, timeout_ms);
++        if (r == 0 and transferred > 0) return .{ .data = @intCast(transferred) };
++        // LIBUSB_ERROR_TIMEOUT is expected, not an error.
++        if (r == c.LIBUSB_ERROR_TIMEOUT) return .timeout;
++        if (isFatal(r)) {
++            // Logged once per teardown, since the reader stops polling after it.
++            if (!self.fatal) log.err("recv fatal: libusb r={d}", .{r});
++            self.fatal = true;
++            return .fatal;
+         }
+-        return null;
++        if (r != 0) log.debug("recv error: {d}", .{r});
++        return .timeout;
++    }
++
++    fn bytesOf(result: RecvResult) ?usize {
++        return switch (result) {
++            .data => |n| n,
++            .timeout, .fatal => null,
++        };
++    }
++
++    /// The codes an unplug produces. Everything else libusb can return here is
++    /// transient (a stall, an interrupted call, a zero-length packet) and must
++    /// not trigger a reopen, which would drop a working session on a blip.
++    fn isFatal(r: c_int) bool {
++        return r == c.LIBUSB_ERROR_IO or
++            r == c.LIBUSB_ERROR_NO_DEVICE or
++            r == c.LIBUSB_ERROR_NOT_FOUND;
+     }
+ 
+     pub fn deinit(self: *LibusbTransport) void {

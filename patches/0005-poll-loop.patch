@@ -1,0 +1,332 @@
+diff --git a/applications/tobiifreed/src/main.zig b/applications/tobiifreed/src/main.zig
+index 65c8d69..650c931 100644
+--- a/applications/tobiifreed/src/main.zig
++++ b/applications/tobiifreed/src/main.zig
+@@ -33,6 +33,19 @@ var server: Server = undefined;
+ var ws: ?WsServer = null;
+ var quit: bool = false;
+ 
++// Reconnect runs on the USB thread and has to replay what main() did at boot,
++// so the geometry and the force flag outlive argument parsing.
++var display_area: Tracker.DisplayArea = .{};
++var force_display_area: bool = false;
++
++// False from the moment a transfer reports the device gone until the session is
++// rebuilt. Task 9 (P8) turns this into a status message; forwardCommand already
++// reads it to refuse commands there is no endpoint for.
++var device_present: std.atomic.Value(bool) = std.atomic.Value(bool).init(true);
++
++fn broadcastStatus() void {} // filled in by Task 9 (P8)
++fn applySavedCalibration() void {} // filled in by Task 9 (P8/P9)
++
+ // The USB thread owns the bulk endpoint and the core parser state. Client
+ // commands run on the main thread and touch the same globals: request_* writes
+ // session_out and the core's seq->request_id table, transport.send drives the
+@@ -56,11 +69,15 @@ var usb_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true);
+ // A pipe notifies the main thread that new data is available so it
+ // can block on poll() instead of busy-spinning.
+ 
+-const GAZE_RING_SIZE = 64;
++// 256 slots is 7.7s at the measured 33.2Hz. 64 was 1.9s, which is less than
++// usbPause's own 1s budget plus one command, so a single slow command could
++// lap the reader.
++const GAZE_RING_SIZE = 256;
+ var gaze_ring: [GAZE_RING_SIZE]core.GazeSample = undefined;
+ var gaze_write: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+ var gaze_read: u32 = 0; // only touched by main thread
+ var gaze_count: u64 = 0;
++var gaze_overrun: u64 = 0; // only touched by main thread
+ var notify_pipe: [2]std.posix.fd_t = .{ -1, -1 };
+ 
+ fn onGaze(sample: *const core.GazeSample) void {
+@@ -74,11 +91,36 @@ fn onGaze(sample: *const core.GazeSample) void {
+ 
+ /// Drain the ring buffer and broadcast (called from main thread).
+ fn drainGaze() void {
+-    // Drain notification pipe.
+-    var drain_buf: [64]u8 = undefined;
+-    _ = std.posix.read(notify_pipe[0], &drain_buf) catch {};
++    // Drain the notification pipe to empty. A partial drain leaves POLLIN set,
++    // which turns the poll loop below into a spin.
++    var drain_buf: [256]u8 = undefined;
++    while (true) {
++        const n = std.posix.read(notify_pipe[0], &drain_buf) catch break;
++        if (n < drain_buf.len) break;
++    }
+ 
+     const w = gaze_write.load(.acquire);
++
++    // The writer never blocks, so a starved main thread lets it lap the reader,
++    // and the slots between then hold newer samples than gaze_read points at.
++    // Serving them anyway replayed old samples as if they were fresh: measured
++    // on the unpatched daemon, a 500-command batch delivered 1385 gaze frames
++    // of which only 1055 were distinct, with six backwards jumps of exactly
++    // -252 in frame_counter (63 samples x 4, one lap of the 64-slot ring).
++    // Skip to the oldest slot the writer cannot be inside and count the loss.
++    //
++    // The margin is one slot, not zero: onGaze fills the slot before publishing
++    // the index, so a writer exactly GAZE_RING_SIZE ahead may be mid-copy into
++    // the slot gaze_read names. Only the accumulated lap is checked here, since
++    // draining is microseconds of memcpy against a 30ms sample period.
++    const behind = w -% gaze_read;
++    if (behind >= GAZE_RING_SIZE) {
++        const lost = behind - (GAZE_RING_SIZE - 1);
++        gaze_overrun += lost;
++        gaze_read = w -% (GAZE_RING_SIZE - 1);
++        log.warn("gaze ring overrun: dropped {d} samples ({d} total)", .{ lost, gaze_overrun });
++    }
++
+     while (gaze_read != w) {
+         const sample = &gaze_ring[gaze_read % GAZE_RING_SIZE];
+         gaze_count += 1;
+@@ -187,6 +229,26 @@ fn forwardCommand(client_fd: std.posix.fd_t, cmd_type: u8, payload: []const u8,
+         .subscribe, .disconnect => return, // handled locally, not forwarded
+         else => {},
+     }
++
++    // A reconnect owns transport and tracker outright and the handle is null
++    // between teardown and a successful reopen. Refuse here rather than spend
++    // usbPause's 1s budget waiting on a thread that has stopped polling.
++    if (!device_present.load(.acquire)) {
++        log.warn("refusing cmd=0x{x:0>2}: device not present", .{cmd_type});
++        sendError(client_fd, is_ws, .usb_busy);
++        return;
++    }
++
++    // Guarantees the gaze ring drains between commands. server.readCommands
++    // dispatches every complete message in one buffer fill, so a pipelined
++    // batch otherwise starves the ring for the whole batch, and each command
++    // costs a full USB poll. Registered before the resume defer so it runs
++    // after it, with the USB thread producing again.
++    //
++    // Socket path only: WsServer iterates its client array with no re-entrancy
++    // guard, and broadcastGaze can remove the very slot readClients is holding.
++    defer if (!is_ws) drainGaze();
++
+     const paused = usbPause();
+     defer usbResume(paused);
+ 
+@@ -435,6 +497,59 @@ fn installSignalHandlers() void {
+     std.posix.sigaction(std.posix.SIG.INT, &act, null);
+ }
+ 
++// ---------- Main-loop poll set ----------
++
++const POLL_TIMEOUT_MS = 50; // cap, so a SIGTERM is noticed on an idle daemon
++
++// notify pipe, both listen sockets, and every client slot of both servers.
++const MAX_POLL_FDS = 3 + @typeInfo(@FieldType(Server, "clients")).array.len +
++    @typeInfo(@FieldType(WsServer, "clients")).array.len;
++var poll_fds: [MAX_POLL_FDS]std.posix.pollfd = undefined;
++
++/// Block until there is something to service. The loop this replaces slept 1ms
++/// unconditionally, so the notify pipe was dead weight, every sample gained up
++/// to 1ms, and the process woke 1000 times a second.
++///
++/// Established client fds are in the set, not just the listeners: with only the
++/// listeners a connected client's command waits out POLL_TIMEOUT_MS, which is
++/// worse than the sleep this replaces.
++fn pollWait() void {
++    var n: usize = 0;
++    poll_fds[n] = .{ .fd = notify_pipe[0], .events = std.posix.POLL.IN, .revents = 0 };
++    n += 1;
++    poll_fds[n] = .{ .fd = server.listen_fd, .events = std.posix.POLL.IN, .revents = 0 };
++    n += 1;
++
++    // The USB thread removes clients through sendToClient, so reading an fd out
++    // of the array needs the lock. It is held for the copy and nothing else.
++    server.lock.lock();
++    for (&server.clients) |*slot| {
++        const client = &(slot.* orelse continue);
++        var events: i16 = std.posix.POLL.IN;
++        // Output parked on WouldBlock is retried by flushPending. Without
++        // POLLOUT that retry waits for the timeout instead of for the socket.
++        if (client.out_off < client.out_len) events |= std.posix.POLL.OUT;
++        poll_fds[n] = .{ .fd = client.fd, .events = events, .revents = 0 };
++        n += 1;
++    }
++    server.lock.unlock();
++
++    if (ws) |*w| {
++        poll_fds[n] = .{ .fd = w.listen_fd, .events = std.posix.POLL.IN, .revents = 0 };
++        n += 1;
++        // WsServer has no lock and the USB thread already walks this array in
++        // sendToClient. A torn read here yields a closed fd, so poll reports
++        // POLLNVAL and the next iteration sees the slot gone.
++        for (&w.clients) |*slot| {
++            const client = &(slot.* orelse continue);
++            poll_fds[n] = .{ .fd = client.fd, .events = std.posix.POLL.IN, .revents = 0 };
++            n += 1;
++        }
++    }
++
++    _ = std.posix.poll(poll_fds[0..n], POLL_TIMEOUT_MS) catch 0;
++}
++
+ // ── Main ────────────────────────────────────────────────────────────
+ 
+ pub fn main() void {
+@@ -442,7 +557,6 @@ pub fn main() void {
+     var ws_addr: u32 = std.mem.nativeToBig(u32, 0x7f000001); // 127.0.0.1
+     var ws_port: u16 = 7081;
+     var ws_enabled: bool = false;
+-    var force_display = false;
+ 
+     var args = std.process.args();
+     _ = args.next();
+@@ -458,7 +572,7 @@ pub fn main() void {
+             initConfig();
+             return;
+         } else if (std.mem.eql(u8, arg, "--force-display-area")) {
+-            force_display = true;
++            force_display_area = true;
+         } else if (std.mem.eql(u8, arg, "--ws")) {
+             ws_enabled = true;
+             // Peek at next arg for optional address.
+@@ -473,9 +587,10 @@ pub fn main() void {
+     }
+ 
+     // Load config.
+-    const display = loadDisplayArea();
++    display_area = loadDisplayArea();
+     log.info("display_area {d:.0}x{d:.0}mm  origin=({d:.0},{d:.0})  z={d:.0}  tilt={d:.2}", .{
+-        display.w_mm, display.h_mm, display.ox_mm, display.oy_mm, display.z_mm, display.tilt_deg,
++        display_area.w_mm, display_area.h_mm, display_area.ox_mm,
++        display_area.oy_mm, display_area.z_mm,  display_area.tilt_deg,
+     });
+ 
+     // Open USB transport.
+@@ -499,9 +614,9 @@ pub fn main() void {
+     // isReset() only fires below 50mm, so any plausible-but-wrong geometry the
+     // device already holds is otherwise permanent, and every later calibration
+     // is computed in that wrong frame. --force-display-area is the way out.
+-    if (force_display or tracker.display.isReset()) {
+-        if (force_display) log.info("forcing display area from config", .{});
+-        if (!tracker.setDisplayArea(display)) {
++    if (force_display_area or tracker.display.isReset()) {
++        if (force_display_area) log.info("forcing display area from config", .{});
++        if (!tracker.setDisplayArea(display_area)) {
+             log.err("failed to set display area from config", .{});
+             std.process.exit(1);
+         }
+@@ -549,8 +664,9 @@ pub fn main() void {
+ 
+     log.info("running", .{});
+ 
+-    // Main loop — poll on notification pipe + short timeout for socket I/O.
++    // Main loop. Blocks in poll() until there is something to service.
+     while (!quit) {
++        pollWait();
+         // Check for gaze data from USB thread.
+         drainGaze();
+         // Service client connections.
+@@ -564,9 +680,6 @@ pub fn main() void {
+             w.acceptClients();
+             w.readClients();
+         }
+-        // Sleep briefly to avoid busy-spinning on socket I/O.
+-        // The pipe notification + this short sleep gives ~1ms latency.
+-        std.Thread.sleep(1_000_000); // 1ms
+     }
+ 
+     log.info("shutting down", .{});
+@@ -654,10 +767,99 @@ fn usbThreadFn() void {
+         }
+         tracker.poll();
+         _ = usb_polls.fetchAdd(1, .release);
++        // LIBUSB_ERROR_NO_DEVICE returns immediately rather than consuming the
++        // 100ms recv timeout, so an unplugged tracker turns the loop above into
++        // a spin on a core at .log_level = .debug.
++        if (transport.fatal) reconnect();
+     }
+     log.info("USB thread stopped", .{});
+ }
+ 
++/// Tear the dead USB session down and rebuild it. Runs on the USB thread, which
++/// owns the transport and the tracker outright while it is in here: the main
++/// thread refuses commands on device_present, and usbPause cannot succeed
++/// because usb_polls stops advancing, so it returns false and the command is
++/// refused rather than run against a half-open endpoint.
++fn reconnect() void {
++    device_present.store(false, .release);
++    broadcastStatus(); // Task 9
++    failPending();
++
++    tracker.deinit();
++    transport.deinit();
++
++    var backoff_ms: u64 = 100;
++    while (!quit) {
++        log.err("USB fatal, reinitialising in {d}ms", .{backoff_ms});
++        sleepUntilQuit(backoff_ms);
++        if (quit) return;
++        backoff_ms = @min(backoff_ms * 2, 2000);
++
++        transport = LibusbTransport.init() catch continue;
++        tracker = Tracker.init(.{
++            .send_fn = &transportSend,
++            .recv_fn = &transportRecv,
++            .try_recv_fn = &transportTryRecv,
++        }) catch {
++            // Leaving the handle open would make the next open_device fail with
++            // ClaimInterface against this process's own claim.
++            transport.deinit();
++            continue;
++        };
++
++        // Tracker.init leaves queryDisplayArea's capture hook installed and
++        // handshake_init reset the core session, so both hooks have to be put
++        // back. Without them a replug streams no gaze and drops every routed
++        // response, while reporting success.
++        tracker.onGaze(onGaze);
++        core.set_hooks(null, null, onResponse, null, null);
++
++        // ExecStartPost does not re-run for an in-process reconnect, so the
++        // geometry is replayed here. Same rule as boot: only write what the
++        // device does not already hold, since calibration is computed in that
++        // frame and a replug that preserved it must not be overwritten from a
++        // config that may be stale.
++        if (force_display_area or tracker.display.isReset()) {
++            log.info("replaying display area after reconnect", .{});
++            if (!tracker.setDisplayArea(display_area)) log.err("display area replay failed", .{});
++        } else {
++            log.info("device display area preserved across reconnect", .{});
++        }
++        applySavedCalibration(); // Task 9
++
++        device_present.store(true, .release);
++        broadcastStatus(); // Task 9
++        log.info("USB reconnected", .{});
++        return;
++    }
++}
++
++/// Answer everything still waiting on the connection that just died.
++/// handshake_init calls session_reset, which throws away the core's seq table,
++/// so those responses can never arrive and a client would block forever.
++fn failPending() void {
++    var n: u32 = 0;
++    for (&pending) |*slot| {
++        if (slot.*) |entry| {
++            slot.* = null;
++            n += 1;
++            sendError(entry.client_fd, entry.is_ws, .failed);
++        }
++    }
++    if (n > 0) log.warn("failed {d} in-flight requests on USB loss", .{n});
++}
++
++/// Sleep in slices so a SIGTERM during the reconnect backoff is not held for up
++/// to the full 2s.
++fn sleepUntilQuit(ms: u64) void {
++    var left = ms;
++    while (left > 0 and !quit) {
++        const chunk: u64 = @min(left, 50);
++        std.Thread.sleep(chunk * std.time.ns_per_ms);
++        left -= chunk;
++    }
++}
++
+ /// Park the USB thread and wait for it to acknowledge. Returns true only if the
+ /// main thread now owns the USB endpoint and the core parser state. Only the
+ /// main thread calls this, so the handshake needs no reentrancy.
