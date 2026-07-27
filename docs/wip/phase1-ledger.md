@@ -945,3 +945,36 @@ Task 11: cleanup verified by controller (commit 1acfd89). All three residual min
   documented_survivors=3, unexpected_survivors=0.
 Task 11: complete (commits a955357..1acfd89, review APPROVED after one fix round and a
   verified cleanup)
+Task 12: implemented, commit d432926. DONE_WITH_CONCERNS. make check exit 0, killed=97,
+  documented_survivors=5, unexpected_survivors=0, with 41 mutations added of which 5 found
+  real gaps that were closed with tests. Controller verified make check independently and
+  confirmed clang compiles tests/test_display.c cleanly at -Werror; the clangd arity
+  warnings were a stale index, not a defect.
+  WIRE GRAMMAR CONFIRMED, and my plan correction was right: the reply is response 0x02 /
+  cmd_type 0x02 / 164-byte raw TTP body, being a 2-byte prolog, three 48-byte point3d
+  (tag 0x031f41 plus three Q42 values at 2^42), then a 0x010100 plus u32 trailer.
+Task 12: SIXTH SET OF PLAN DEFECTS. THREE OF THE BRIEF'S FOUR CONVERSION FORMULAS ARE WRONG
+  AT NONZERO TILT: projected height, z from the top corner, and the tilt sign. The
+  implementer instead implemented the exact inverse of the daemon's setDisplayArea, pinned
+  by a round-trip test and three mutations. THIS IS THE MOST DANGEROUS DEFECT CLASS THIS
+  PROJECT HAS SEEN, because the device's tilt is currently 0, so formulas wrong only at
+  nonzero tilt PASS EVERY LIVE TEST TODAY and would fail the first day someone measures a
+  real tilt, which is exactly what Task 13 asks the user to do.
+Task 12: the gate compares the ORIGIN, not just width and height, and that was proved to
+  matter: a config correct in w and h but 178 mm off vertically is caught ONLY by the
+  origin comparison, and the brief's field set would have passed it.
+Task 12: version gate decision, which was this task's to make: REFUSE before sending any
+  command, no override. Rationale: a version bump means a message changed shape, and a
+  164-byte body decoded under the wrong grammar yields a clean-looking WRONG rectangle. The
+  test proves nothing reached the wire by counting commands at a fake daemon.
+Task 12: the tool reads the daemon's own ~/.config/tobii.json, which needed a small JSON
+  reader plus a C port of evalAnchorExpr, and REFUSES on a bad file where the daemon itself
+  silently falls back to its 1500x1000 template. That is a SECOND IMPLEMENTATION of the
+  daemon's config parsing with only tests holding the two together, and the anchor grammar
+  is the same one Task 5 already tripped over ("center" parses to null and falls back
+  silently).
+Task 12: concerns recorded: gz_tlv_read_u32 is tested API with no production caller; a
+  skewed quad is CONVERTED rather than rejected, matching setDisplayArea; GZ_DA_TOL_MM 1.0
+  is asserted rather than measured and --tol 0 passes today; and the gate explicitly does
+  NOT cover unmeasured z_mm, tilt, cx or cy, which the CLI prints as a caveat on every
+  success.
