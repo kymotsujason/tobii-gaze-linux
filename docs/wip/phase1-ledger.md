@@ -1650,3 +1650,31 @@ FIT REFUSED A SECOND TIME, 2026-07-27, and again the refusal was CORRECT.
   WATCH ITEM: if the isotropy guard refuses repeatedly at normal posture, the envelope may
   be too tight, having been derived from six sweeps at ONE posture, or the isotropy
   assumption may not hold across eye heights. One more attempt at normal posture first.
+=== THE CORRECTION WORKS. PHASE 1's ACCURACY BLOCKER IS CLEARED. 2026-07-27 ===
+FIT ACCEPTED on the third attempt: gx 1.17213, gy 1.18952, bx -0.014093, by -0.062792,
+  isotropy 0.9854, 9 of 9 points, 0 rejected, median fit residual 11.1 mm (48 px). Written
+  to ~/.local/share/tobii-gaze/correction.conf. Eye at y 9-13 mm, z 646-690 mm.
+  Note the guard band is +/-5 percent per spec 5.5, not the narrower "measured 0.9991 to
+  1.0148" the line prints as context, which is why 0.9854 passed and the earlier 1.0619 did
+  not.
+ACCEPTANCE TEST PASSED, same position, no movement:
+  BEFORE CORRECTION median 258 px, worst 374 px
+  CORRECTED         median  37 px, worst 177 px
+  verdict WITHIN ONE DEGREE, and inside the predicted 35-50 px acceptance band.
+  A sevenfold improvement, and the first time this project has been inside spec section 13's
+  one-degree target.
+SECOND SWEEP was NOT the lateral test: eye_mm x averaged 20.6 on verify and 24.3 on
+  "lateral", a movement of about 4 mm against the 250-300 mm asked for. So it is effectively
+  a SECOND verify at the same position, and it corrected to median 50 px worst 91 px. Useful
+  anyway: run-to-run spread at a fixed position is 37 to 50 px.
+HEAD-AWARE QUESTION STILL OPEN, and score_correction.py says so honestly rather than
+  guessing: "INCONCLUSIVE. The head moved 10 mm in the screen plane, which separates the two
+  forms by only 7 px, inside the noise." Form H scored median 50 px and form S 45 px, i.e.
+  indistinguishable. Deciding it needs a genuinely lateral or vertical shift of 250 mm or
+  more. It does NOT affect the accuracy result: both forms correct to about the same figure
+  at this position. It matters for Plan 2, which must know whether the correction has to
+  track the head.
+ANOMALY WORTH WATCHING: on the verify sweep the CENTRE point (pt 5) corrected WORSE than
+  raw, 118 px to 177 px, and was the worst point of the nine while every other point
+  improved by 5 to 15x. It also carried n=18 frames rather than 20. One point, one sweep,
+  but the centre is the last place an outward-scaling correction should hurt.
