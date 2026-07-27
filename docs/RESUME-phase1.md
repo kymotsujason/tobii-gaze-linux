@@ -56,12 +56,36 @@ A file survives a lost message.
 |---|---|
 | 1. Repo skeleton, pinned vendor, build script | complete (`be827e7..5b075cb`) |
 | 2. udev scripts | complete (`c7d1cf5`, `1fdb7a4`) |
-| 3. Bring-up spike | complete (`ae218b6..19e5a6f`, review clean) |
-| 4. P7 calibration buffers | complete (`60b3ae3..8de095d`, review clean) |
-| 5. P4 force the display area | complete (`b029663`, review clean) |
-| 6-9. Remaining daemon patches | not started, briefs staged |
-| 10-12. `gaze-cal` protocol, client, display gate | not started, briefs staged |
-| 13-16. Calibration, systemd, trace, refit | not started, 13 and 15 need the human |
+| 3. Bring-up spike | complete (`ae218b6..19e5a6f`) |
+| 4. P7 calibration buffers | complete (`60b3ae3..8de095d`) |
+| 5. P4 force the display area | complete (`b029663`) |
+| 6. P1 single USB owner | complete (`5f20579`) |
+| 7. P2+P3 one write path | complete (`ed3374a..7e64687`) |
+| 8. P6+P5 poll loop, unplug recovery | complete (`25932e6..84fc228`) |
+| 9. P8+P9 status message, pending lifetime | complete (`dfe0ae0..54539ff`) |
+| 10. `gaze-cal` protocol layer | complete (`c8e6cd8..a955357`) |
+| 11. `gaze-cal` client | complete (`7dfac2a..1acfd89`) |
+| 12. Display area readback gate | complete (`d432926..e6dc84a`) |
+| 14. systemd user unit | complete (`ebf87fb..91520cb`), done out of order |
+| **13. Calibration + persistence experiment** | **BLOCKED, needs the human at the hardware** |
+| **15. Trace recorder** | **BLOCKED, needs five minutes of real osu** |
+| 16. Refit filter constants | blocked behind 15, which produces its input |
+
+Every task carries a review verdict. Ten of the fourteen closed needed a fix round first.
+
+## What the human still has to do
+
+1. **Measure the tracker mounting geometry.** `~/.config/tobii.json` has a measured
+   `w_mm` 597 and `h_mm` 336, but `z_mm`, `tilt`, `cx` and `cy` are the daemon's shipped
+   template defaults. Calibration is computed in that frame and the Task 12 gate CANNOT
+   catch a wrong value there, because it compares the device against the config's own
+   numbers. Note that measuring a real tilt is also the first thing that will ever exercise
+   Task 12's corrected formulas, since three of the plan's four were wrong only at nonzero
+   tilt and the device sits at 0 today.
+2. **The replug test**, `docs/physical-test-checklist.md`. Item 4 decides whether the ET5
+   keeps geometry across a power cycle, and therefore whether a whole branch of the
+   reconnect path is dead code or the critical path.
+3. **Then Task 13's nine-point calibration** and the persistence experiment.
 
 Briefs for every task are extracted in the workspace as `task-N-brief.md`. Regenerate with
 `scripts/task-brief PLAN_FILE N` from the skill directory.
