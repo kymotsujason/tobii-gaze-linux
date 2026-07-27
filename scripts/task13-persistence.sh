@@ -27,7 +27,9 @@ LOG=${LOG:-$HOME/.local/share/tobii-gaze/gaze-cal.log}
 step() { printf '\n=== %s ===\n' "$*"; }
 
 pause() {
-    printf '\n>>> %s\n>>> Press Enter when ready.\n' "$*"
+    # stderr, not stdout: every caller runs inside $( ), which would otherwise
+    # swallow the prompt and leave the operator staring at a silent terminal.
+    printf '\n>>> %s\n>>> Press Enter when ready.\n' "$*" >&2
     read -r _
 }
 
@@ -36,7 +38,7 @@ run_accuracy() {
     local label=$1 out
     pause "LOOK AT EACH WHITE DOT in turn. Nine dots, about 1.3 s each."
     out=$("$CAL" accuracy --label "$label" 2>&1)
-    printf '%s\n' "$out"
+    printf '%s\n' "$out" >&2
     printf '%s\n' "$out" | grep -m1 "median error" || echo "median error: n/a"
 }
 
