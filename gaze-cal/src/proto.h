@@ -166,6 +166,107 @@ int gz_sample_any_eye_valid(const struct gz_gaze_sample *s);
 /* Samples lost between two consecutive delivered frames. */
 uint32_t gz_frames_dropped(uint32_t prev_counter, uint32_t next_counter);
 
+/* ---------------- TTP TLV, and the display area that rides on it -----------
+ *
+ * get_display_area does NOT come back as nine f64. Srv.display_area (0x03)
+ * exists in the Zig enum and reaches encodeHeader nowhere in the daemon, so
+ * that frame type is never emitted. The reply is a response (0x02) with
+ * cmd_type 0x02 whose body is the device's raw TTP payload, forwarded verbatim:
+ * tobiifree_core.zig dispatchFrame() hands on_response ttp + TTP_HDR_SIZE, and
+ * main.zig onResponse() memcpys that straight into encodeResponse.
+ *
+ * The body is TLV, described in driver/src/tlv.zig. Every field is
+ * [u8 type][u32 BE size][size bytes of body]. Only three types are needed
+ * here, and each is length-checked against its declared size so that a body
+ * which is merely the right length cannot be read as the right shape.
+ *
+ * Measured against the live device on 2026-07-27, body length exactly 164:
+ *   [00 00] prolog, 2 bytes, skipped
+ *   point3d TL, 48 bytes   (9-byte tag + 3 x 13-byte Q42)
+ *   point3d TR, 48 bytes
+ *   point3d BL, 48 bytes
+ *   tag 0x010100, 9 bytes  + u32 0x3039, 9 bytes   (trailer, not read)
+ * BR is never on the wire, in either direction: build_set_display_area_corners
+ * encodes only TL, TR and BL. */
+#define GZ_TLV_TYPE_U32     2
+#define GZ_TLV_TYPE_FIX16   3
+#define GZ_TLV_TYPE_Q42     4
+#define GZ_TLV_TYPE_PROLOG  5
+
+/* tlv.zig: point3d = prolog(0x031f41) + 3 x Q42. tobiifree_core.zig writes the
+ * same constant as 0x31f41. Demanding it exactly is what stops a misparse from
+ * yielding a clean-looking rectangle. */
+#define GZ_TLV_TAG_POINT3D  0x031f41u
+
+/* Q42 is a signed 64-bit fixed-point value scaled by 2^42. */
+#define GZ_Q42_SCALE 4398046511104.0
+
+/* decode_display_area (tobiifree_core.zig:445) skips two bytes before the
+ * first point and does not look at them. */
+#define GZ_DA_PROLOG_SIZE 2
+
+/* Three point3d after the prolog. The trailer is not required, so a device
+ * that stops here still decodes. */
+#define GZ_DA_MIN_BODY (GZ_DA_PROLOG_SIZE + 3 * 48)
+
+struct gz_tlv {
+    const unsigned char *buf;
+    size_t len;
+    size_t pos;
+};
+
+void gz_tlv_init(struct gz_tlv *r, const unsigned char *buf, size_t len);
+
+/* Each returns 1 on success and 0 on a short read, a wrong type byte, a size
+ * field that does not match the type, or a tag that is not the one demanded.
+ * A failed read leaves pos wherever it got to: the callers here abandon the
+ * whole body rather than resynchronise, because there is nothing to
+ * resynchronise onto. */
+int gz_tlv_read_prolog_tag(struct gz_tlv *r, uint32_t *out_tag);
+int gz_tlv_read_q42(struct gz_tlv *r, double *out);
+int gz_tlv_read_u32(struct gz_tlv *r, uint32_t *out);
+int gz_tlv_read_point3d(struct gz_tlv *r, double out[3]);
+
+/* Port of decode_display_area. Writes tl,tr,bl as x,y,z into out[9] and
+ * returns 1, or returns 0 and writes nothing. */
+int gz_decode_display_area(const unsigned char *body, size_t len, double out[9]);
+
+/* ---------------- display geometry ----------------
+ *
+ * The same parameterisation the daemon's config file uses,
+ * Tracker.DisplayArea in driver/src/tracker.zig. ox/oy are the bottom-left
+ * corner in tracker-space mm, which is where tracker.zig puts the origin, and
+ * they are NOT derivable from w and h: two areas of identical size sitting in
+ * different places are different calibration frames.
+ *
+ * All six fields are recovered, so gz_corners_to_rect is the exact inverse of
+ * Tracker.setDisplayArea rather than a projection that happens to agree at
+ * tilt 0. tests/test_proto.c pins the round trip at a nonzero tilt. */
+struct gz_rect {
+    double w_mm, h_mm;
+    double ox_mm, oy_mm;   /* bottom-left corner, tracker space */
+    double z_mm;           /* bottom edge distance along the tracker's z */
+    double tilt_deg;       /* negative = top edge toward the user */
+};
+
+struct gz_rect gz_corners_to_rect(const double c[9]);
+
+/* setDisplayArea's forward map, so a round trip is testable and Task 13 can
+ * build a set_display_area_corners payload without repeating the trigonometry. */
+void gz_rect_to_corners(struct gz_rect r, double out[9]);
+
+/* Which fields of `got` differ from `want`. Zero means every field agrees.
+ * Pure: the caller decides what to print and whether to refuse. */
+#define GZ_DA_DIFF_W    (1u << 0)
+#define GZ_DA_DIFF_H    (1u << 1)
+#define GZ_DA_DIFF_OX   (1u << 2)
+#define GZ_DA_DIFF_OY   (1u << 3)
+#define GZ_DA_DIFF_Z    (1u << 4)
+#define GZ_DA_DIFF_TILT (1u << 5)
+
+unsigned gz_rect_diff(struct gz_rect got, struct gz_rect want,
+                      double tol_mm, double tol_deg);
+
 #ifdef __cplusplus
 }
 #endif

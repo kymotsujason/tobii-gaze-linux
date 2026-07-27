@@ -7,26 +7,33 @@ CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -O2 -g
 # A fixed list breaks every build until then.
 SRC      = $(wildcard src/*.c)
 BUILD    = build
+# proto.c uses hypot and atan2 for the display-area conversion, so every target
+# that links it needs libm, not only the CLI.
+LDLIBS   = -lm
 
 .DEFAULT_GOAL := $(BUILD)/gaze-cal
 
 $(BUILD)/gaze-cal: $(SRC) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $(SRC) -lm
+	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
 $(BUILD):
 	mkdir -p $(BUILD)
 test: | $(BUILD)
-	$(CC) $(CFLAGS) -o $(BUILD)/test_proto tests/test_proto.c src/proto.c && $(BUILD)/test_proto
-	$(CC) $(CFLAGS) -o $(BUILD)/test_client tests/test_client.c src/client.c src/proto.c && $(BUILD)/test_client
+	$(CC) $(CFLAGS) -o $(BUILD)/test_proto tests/test_proto.c src/proto.c $(LDLIBS) && $(BUILD)/test_proto
+	$(CC) $(CFLAGS) -o $(BUILD)/test_client tests/test_client.c src/client.c src/proto.c $(LDLIBS) && $(BUILD)/test_client
+	$(CC) $(CFLAGS) -o $(BUILD)/test_display tests/test_display.c src/display.c src/client.c src/proto.c $(LDLIBS) && $(BUILD)/test_display
 
 # Proves the parser never reads past the caller's buffer and never relies on
 # undefined behaviour. The exact-fit heap tests are meaningless without it.
 test-asan: | $(BUILD)
 	$(CC) $(CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
-	    -o $(BUILD)/test_proto_asan tests/test_proto.c src/proto.c && \
+	    -o $(BUILD)/test_proto_asan tests/test_proto.c src/proto.c $(LDLIBS) && \
 	    ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 $(BUILD)/test_proto_asan
 	$(CC) $(CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
-	    -o $(BUILD)/test_client_asan tests/test_client.c src/client.c src/proto.c && \
+	    -o $(BUILD)/test_client_asan tests/test_client.c src/client.c src/proto.c $(LDLIBS) && \
 	    ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 $(BUILD)/test_client_asan
+	$(CC) $(CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
+	    -o $(BUILD)/test_display_asan tests/test_display.c src/display.c src/client.c src/proto.c $(LDLIBS) && \
+	    ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 $(BUILD)/test_display_asan
 
 # Plan 2's OBS plugin is C++ and includes these headers directly. The objects
 # are built by the C compiler and linked by the C++ one on purpose: a header
@@ -36,10 +43,10 @@ test-cxx: | $(BUILD)
 	$(CC) $(CFLAGS) -c src/proto.c -o $(BUILD)/proto_c.o
 	$(CC) $(CFLAGS) -c src/client.c -o $(BUILD)/client_c.o
 	$(CXX) $(CXXFLAGS) -c tests/test_proto_cxx.cpp -o $(BUILD)/test_proto_cxx.o
-	$(CXX) -o $(BUILD)/test_proto_cxx $(BUILD)/test_proto_cxx.o $(BUILD)/proto_c.o
+	$(CXX) -o $(BUILD)/test_proto_cxx $(BUILD)/test_proto_cxx.o $(BUILD)/proto_c.o $(LDLIBS)
 	$(BUILD)/test_proto_cxx
 	$(CXX) $(CXXFLAGS) -c tests/test_client_cxx.cpp -o $(BUILD)/test_client_cxx.o
-	$(CXX) -o $(BUILD)/test_client_cxx $(BUILD)/test_client_cxx.o $(BUILD)/client_c.o $(BUILD)/proto_c.o
+	$(CXX) -o $(BUILD)/test_client_cxx $(BUILD)/test_client_cxx.o $(BUILD)/client_c.o $(BUILD)/proto_c.o $(LDLIBS)
 	$(BUILD)/test_client_cxx
 
 # Breaks proto.c and client.c one way at a time and requires the suite to
@@ -50,7 +57,7 @@ mutate:
 # Needs a running tobiifreed and a connected tracker, so it is not part of
 # `check`. Exits 77 when the daemon is not reachable.
 test-live: | $(BUILD)
-	$(CC) $(CFLAGS) -o $(BUILD)/test_client_live tests/test_client_live.c src/client.c src/proto.c
+	$(CC) $(CFLAGS) -o $(BUILD)/test_client_live tests/test_client_live.c src/client.c src/proto.c $(LDLIBS)
 	$(BUILD)/test_client_live
 
 check: test test-asan test-cxx mutate

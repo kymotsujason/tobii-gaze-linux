@@ -15,6 +15,7 @@
 #include <time.h>
 
 #include "client.h"
+#include "display.h"
 
 static volatile sig_atomic_t stop_requested = 0;
 
@@ -143,8 +144,15 @@ static int cmd_monitor(const char *path, double seconds) {
 static void usage(void) {
     fprintf(stderr,
             "usage: gaze-cal [--socket PATH] <command>\n"
-            "  status              print the device status and exit\n"
-            "  monitor [seconds]   stream gaze, reporting rate and drops\n");
+            "  status                     print the device status and exit\n"
+            "  monitor [seconds]          stream gaze, reporting rate and drops\n"
+            "  display [--config PATH] [--tol MM]\n"
+            "                             read the display area back off the device and\n"
+            "                             refuse if it disagrees with the config\n"
+            "\n"
+            "display exits 0 when they agree, 1 when the device disagrees (fix with\n"
+            "tobiifreed --force-display-area), 3 when the geometry could not be read\n"
+            "at all, and 2 on a usage or config error.\n");
 }
 
 int main(int argc, char **argv) {
@@ -173,6 +181,30 @@ int main(int argc, char **argv) {
     if (i >= argc) { usage(); return 2; }
 
     if (strcmp(argv[i], "status") == 0) return cmd_status(path);
+    if (strcmp(argv[i], "display") == 0) {
+        const char *cfg = NULL;
+        double tol = GZ_DA_TOL_MM;
+        for (int a = i + 1; a < argc; a++) {
+            if (strcmp(argv[a], "--config") == 0 && a + 1 < argc) {
+                cfg = argv[++a];
+            } else if (strcmp(argv[a], "--tol") == 0 && a + 1 < argc) {
+                /* strtod rather than atof: atof reports unparseable input as
+                 * 0.0, and 0.0 is a legitimate tolerance here (the comparison
+                 * is <=), so a typo would silently become the strictest gate
+                 * rather than an error. */
+                char *end = NULL;
+                tol = strtod(argv[++a], &end);
+                if (end == argv[a] || *end != '\0' || !(tol >= 0)) {
+                    fprintf(stderr, "--tol wants a non-negative number of mm\n");
+                    return 2;
+                }
+            } else {
+                usage();
+                return 2;
+            }
+        }
+        return gz_cmd_display(path, cfg, tol);
+    }
     if (strcmp(argv[i], "monitor") == 0) {
         double seconds = 10.0;
         if (i + 1 < argc) seconds = atof(argv[i + 1]);

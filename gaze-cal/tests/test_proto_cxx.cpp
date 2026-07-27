@@ -75,6 +75,37 @@ int main() {
     /* gz_frames_dropped */
     assert(gz_frames_dropped(100, 108) == 1);
 
+    /* The TLV reader and the geometry conversion. Plan 2's plugin needs the
+     * conversion to map gaze into panel coordinates, so these symbols have to
+     * resolve from C++ as well. */
+    unsigned char pt[48];
+    pt[0] = 5; pt[1] = 0; pt[2] = 0; pt[3] = 0; pt[4] = 4;
+    pt[5] = 0x00; pt[6] = 0x03; pt[7] = 0x1f; pt[8] = 0x41;
+    for (int i = 0; i < 3; i++) {
+        unsigned char *q = pt + 9 + i * 13;
+        q[0] = 4; q[1] = 0; q[2] = 0; q[3] = 0; q[4] = 8;
+        std::memset(q + 5, 0, 8);
+        q[7] = 0x04;                  /* 1.0 in Q42: raw 2^42, big endian */
+    }
+    struct gz_tlv r;
+    gz_tlv_init(&r, pt, sizeof pt);
+    double p3[3] = {0, 0, 0};
+    assert(gz_tlv_read_point3d(&r, p3) == 1);
+    assert(p3[0] == 1.0 && p3[1] == 1.0 && p3[2] == 1.0);
+
+    struct gz_rect want = {597, 336, -298.5, 10, 0, 0};
+    double corners[9];
+    gz_rect_to_corners(want, corners);
+    struct gz_rect back = gz_corners_to_rect(corners);
+    assert(back.w_mm == 597 && back.h_mm == 336 && back.oy_mm == 10);
+    assert(gz_rect_diff(back, want, 1.0, 0.5) == 0);
+    back.w_mm += 10;
+    assert(gz_rect_diff(back, want, 1.0, 0.5) == GZ_DA_DIFF_W);
+
+    unsigned char da[164];
+    std::memset(da, 0, sizeof da);
+    assert(gz_decode_display_area(da, sizeof da, corners) == 0);
+
     std::printf("all proto C++ interop tests passed\n");
     return 0;
 }

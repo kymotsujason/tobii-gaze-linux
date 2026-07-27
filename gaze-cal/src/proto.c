@@ -1,6 +1,18 @@
-/* gaze-cal/src/proto.c - see proto.h. No allocation, no I/O, no CLI deps. */
+/* gaze-cal/src/proto.c - see proto.h. No allocation, no I/O, no CLI deps.
+ *
+ * The gate that refuses a wrong display area prints, and printing is I/O, so
+ * the decision lives here as a pure predicate and the printing lives in
+ * display.c. That keeps stdio out of Plan 2's OBS filter plugin, which links
+ * this file. */
+#include <math.h>
 #include <string.h>
 #include "proto.h"
+
+/* -std=c11 defines __STRICT_ANSI__, which stops glibc from enabling
+ * _DEFAULT_SOURCE, so math.h does not declare M_PI. Spelled out rather than
+ * reached for with a feature-test macro, because proto.h is also included by a
+ * C++ plugin whose own feature macros are not ours to set. */
+#define GZ_DEG_PER_RAD 57.29577951308232087680
 
 /* daemon_protocol.zig writes the header length with std.mem.writeInt(.little),
  * so it is little endian by specification and not by host coincidence. The
@@ -150,4 +162,160 @@ uint32_t gz_frames_dropped(uint32_t prev_counter, uint32_t next_counter) {
     uint32_t delta = next_counter - prev_counter;
     if (delta < GZ_FRAME_COUNTER_STEP) return 0;
     return delta / GZ_FRAME_COUNTER_STEP - 1;
+}
+
+/* ---------------- TTP TLV ----------------
+ *
+ * Big endian here, unlike every length in the daemon framing above. The TLV
+ * bytes are the device's own, forwarded untouched, and the device is big
+ * endian on the wire. Mixing the two readers is the easy mistake. */
+static uint32_t rd_u32be(const unsigned char *p) {
+    return ((uint32_t)p[0] << 24)
+         | ((uint32_t)p[1] << 16)
+         | ((uint32_t)p[2] << 8)
+         |  (uint32_t)p[3];
+}
+
+static uint64_t rd_u64be(const unsigned char *p) {
+    return ((uint64_t)rd_u32be(p) << 32) | (uint64_t)rd_u32be(p + 4);
+}
+
+/* Converting a uint64_t above INT64_MAX to int64_t is implementation-defined,
+ * and -fsanitize=undefined is entitled to say so. This is the well-defined
+ * spelling: ~v is at most INT64_MAX whenever v is not. */
+static int64_t as_i64(uint64_t v) {
+    if (v <= (uint64_t)INT64_MAX) return (int64_t)v;
+    return -(int64_t)(~v) - 1;
+}
+
+void gz_tlv_init(struct gz_tlv *r, const unsigned char *buf, size_t len) {
+    r->buf = buf;
+    r->len = len;
+    r->pos = 0;
+}
+
+/* struct gz_tlv is public and pos is writable, so len - pos is not safe to
+ * compute blind: a caller that seeks past the end would wrap size_t and every
+ * bounds check below would then read as "plenty of room left". */
+static size_t tlv_avail(const struct gz_tlv *r) {
+    return r->pos <= r->len ? r->len - r->pos : 0;
+}
+
+/* Reads [type][u32 BE size] and checks both against what the caller expects.
+ * The size is validated even though it is implied by the type, because that is
+ * the only thing distinguishing a real field from a byte pattern of the right
+ * length that happens to start with the right type byte. */
+static int tlv_header(struct gz_tlv *r, uint8_t want_type, uint32_t want_size) {
+    if (tlv_avail(r) < 5) return 0;
+    if (r->buf[r->pos] != want_type) return 0;
+    if (rd_u32be(r->buf + r->pos + 1) != want_size) return 0;
+    r->pos += 5;
+    return 1;
+}
+
+int gz_tlv_read_prolog_tag(struct gz_tlv *r, uint32_t *out_tag) {
+    if (!tlv_header(r, GZ_TLV_TYPE_PROLOG, 4)) return 0;
+    if (tlv_avail(r) < 4) return 0;
+    *out_tag = rd_u32be(r->buf + r->pos);
+    r->pos += 4;
+    return 1;
+}
+
+int gz_tlv_read_u32(struct gz_tlv *r, uint32_t *out) {
+    if (!tlv_header(r, GZ_TLV_TYPE_U32, 4)) return 0;
+    if (tlv_avail(r) < 4) return 0;
+    *out = rd_u32be(r->buf + r->pos);
+    r->pos += 4;
+    return 1;
+}
+
+int gz_tlv_read_q42(struct gz_tlv *r, double *out) {
+    if (!tlv_header(r, GZ_TLV_TYPE_Q42, 8)) return 0;
+    if (tlv_avail(r) < 8) return 0;
+    *out = (double)as_i64(rd_u64be(r->buf + r->pos)) / GZ_Q42_SCALE;
+    r->pos += 8;
+    return 1;
+}
+
+int gz_tlv_read_point3d(struct gz_tlv *r, double out[3]) {
+    uint32_t tag;
+    if (!gz_tlv_read_prolog_tag(r, &tag)) return 0;
+    if (tag != GZ_TLV_TAG_POINT3D) return 0;
+    /* Into a local first: a partial point must not leave two decoded
+     * coordinates and one stale one in the caller's array. */
+    double v[3];
+    for (int i = 0; i < 3; i++) {
+        if (!gz_tlv_read_q42(r, &v[i])) return 0;
+    }
+    memcpy(out, v, sizeof v);
+    return 1;
+}
+
+int gz_decode_display_area(const unsigned char *body, size_t len, double out[9]) {
+    if (body == NULL || len < GZ_DA_PROLOG_SIZE) return 0;
+
+    struct gz_tlv r;
+    gz_tlv_init(&r, body, len);
+    r.pos = GZ_DA_PROLOG_SIZE;
+
+    double v[9];
+    for (int i = 0; i < 3; i++) {
+        if (!gz_tlv_read_point3d(&r, v + i * 3)) return 0;
+    }
+    /* The 0x010100 trailer is not read. decode_display_area does not read it
+     * either, and a device that stopped emitting it would still be sending a
+     * complete display area. */
+    memcpy(out, v, sizeof v);
+    return 1;
+}
+
+/* ---------------- display geometry ----------------
+ *
+ * Exact inverse of Tracker.setDisplayArea, which builds
+ *   bl = (ox, oy, z)
+ *   tl = (ox, oy + h cos t, z + h sin t)
+ *   tr = (ox + w, tl.y, tl.z)
+ * so h is the LENGTH of the TL-BL edge, not its y projection, z is the BOTTOM
+ * edge's z, and the tilt runs from bottom to top. Reading h off the y axis,
+ * taking z from tl, or flipping the atan2 arguments all agree at tilt 0 and
+ * all disagree the moment the panel is tilted, which is exactly the case the
+ * config's unmeasured tilt makes reachable. */
+struct gz_rect gz_corners_to_rect(const double c[9]) {
+    struct gz_rect r;
+    double dy = c[1] - c[7];        /* tl.y - bl.y */
+    double dz = c[2] - c[8];        /* tl.z - bl.z */
+
+    r.w_mm     = fabs(c[3] - c[0]); /* tr.x - tl.x */
+    r.h_mm     = hypot(dy, dz);
+    r.ox_mm    = c[6];              /* bl.x */
+    r.oy_mm    = c[7];              /* bl.y */
+    r.z_mm     = c[8];              /* bl.z */
+    r.tilt_deg = atan2(dz, dy) * GZ_DEG_PER_RAD;
+    return r;
+}
+
+void gz_rect_to_corners(struct gz_rect r, double out[9]) {
+    double a = r.tilt_deg / GZ_DEG_PER_RAD;
+    double tl_y = r.oy_mm + r.h_mm * cos(a);
+    double tl_z = r.z_mm  + r.h_mm * sin(a);
+
+    out[0] = r.ox_mm;            out[1] = tl_y; out[2] = tl_z;   /* tl */
+    out[3] = r.ox_mm + r.w_mm;   out[4] = tl_y; out[5] = tl_z;   /* tr */
+    out[6] = r.ox_mm;            out[7] = r.oy_mm; out[8] = r.z_mm; /* bl */
+}
+
+/* Written as !(diff <= tol) rather than (diff > tol) so that a NaN reports a
+ * mismatch. Both spellings agree on every real number and disagree on NaN,
+ * where the second one would call an undecidable comparison a match, and a
+ * gate that passes on garbage is worse than no gate. */
+unsigned gz_rect_diff(struct gz_rect got, struct gz_rect want,
+                      double tol_mm, double tol_deg) {
+    unsigned d = 0;
+    if (!(fabs(got.w_mm     - want.w_mm)     <= tol_mm))  d |= GZ_DA_DIFF_W;
+    if (!(fabs(got.h_mm     - want.h_mm)     <= tol_mm))  d |= GZ_DA_DIFF_H;
+    if (!(fabs(got.ox_mm    - want.ox_mm)    <= tol_mm))  d |= GZ_DA_DIFF_OX;
+    if (!(fabs(got.oy_mm    - want.oy_mm)    <= tol_mm))  d |= GZ_DA_DIFF_OY;
+    if (!(fabs(got.z_mm     - want.z_mm)     <= tol_mm))  d |= GZ_DA_DIFF_Z;
+    if (!(fabs(got.tilt_deg - want.tilt_deg) <= tol_deg)) d |= GZ_DA_DIFF_TILT;
+    return d;
 }
