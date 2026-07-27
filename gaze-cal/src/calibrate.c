@@ -560,7 +560,8 @@ int gz_correction_path(char *buf, size_t cap) {
 }
 
 int gz_correction_save_to(const char *path, const struct gz_correction *c,
-                          const struct gz_fit_report *rep, double eye_z_mm) {
+                          const struct gz_fit_report *rep, double eye_z_mm,
+                          double mm_per_px) {
     char text[GZ_CORRECTION_TEXT_MAX];
     size_t n = gz_correction_format(c, text, sizeof text);
     if (n == 0) {
@@ -591,10 +592,16 @@ int gz_correction_save_to(const char *path, const struct gz_correction *c,
         if (gmtime_r(&t, &tmv) != NULL) strftime(when, sizeof when, "%Y-%m-%dT%H:%M:%SZ", &tmv);
         ok = fprintf(f, "fit_utc=%s\n", when) > 0;
         if (ok && rep != NULL) {
+            /* Pixels, because spec 4.1 names the key fit_median_resid_px and
+             * because pixels are the unit the acceptance bands are quoted in.
+             * The fit itself works in mm, which is why the conversion is the
+             * caller's: proto.c and the fit know nothing about a panel's
+             * resolution. */
             ok = fprintf(f, "fit_points=%d\nfit_rejected=%d\n"
-                            "fit_median_resid_mm=%.3f\nfit_worst_resid_mm=%.3f\n",
+                            "fit_median_resid_px=%.1f\nfit_worst_resid_px=%.1f\n",
                          rep->n_used, rep->n_rejected,
-                         rep->median_resid_mm, rep->worst_resid_mm) > 0;
+                         rep->median_resid_mm / mm_per_px,
+                         rep->worst_resid_mm / mm_per_px) > 0;
         }
         if (ok) ok = fprintf(f, "fit_eye_z_mm=%.1f\n", eye_z_mm) > 0;
     }
@@ -616,13 +623,14 @@ int gz_correction_save_to(const char *path, const struct gz_correction *c,
 }
 
 int gz_correction_save(const struct gz_correction *c,
-                       const struct gz_fit_report *rep, double eye_z_mm) {
+                       const struct gz_fit_report *rep, double eye_z_mm,
+                       double mm_per_px) {
     char path[600];
     if (gz_correction_path(path, sizeof path) != 0) {
         fprintf(stderr, "cannot build the correction path: $HOME unset or too long\n");
         return -1;
     }
-    if (gz_correction_save_to(path, c, rep, eye_z_mm) != 0) return -1;
+    if (gz_correction_save_to(path, c, rep, eye_z_mm, mm_per_px) != 0) return -1;
     say("saved the correction to %s\n", path);
     return 0;
 }
@@ -1266,8 +1274,11 @@ static void report_corrected(const struct gz_sweep *sw, const struct gz_screen *
 
     struct gz_stat rs = gz_stat_of(raws, n);
     struct gz_stat cs = gz_stat_of(cors, n);
-    say("\ncorrected median %.0f px, worst %.0f px, over %u points"
+    say("\nCORRECTED median %.0f px, worst %.0f px, over %u points"
         " (raw median %.0f px)\n", cs.median, worst, n, rs.median);
+    say("verdict: %s (target %.0f px, one degree at 600 mm)\n",
+        cs.median <= GZ_ACC_TARGET_PX ? "WITHIN ONE DEGREE" : "OUTSIDE ONE DEGREE",
+        GZ_ACC_TARGET_PX);
     /* The spec's acceptance bands. Reported rather than judged into a single
      * pass or fail, because 50 to 80 px means the model is right and something
      * else is degraded, which is a different action from either extreme. */
@@ -1329,16 +1340,23 @@ int gz_cmd_accuracy(const char *sock, const char *cfg, const char *label,
     struct gz_stat es = gz_stat_of(sorted, ns);
     struct gz_stat zs = gz_stat_of(sw.zbuf, sw.nz);
 
-    say("\nmedian error %.0f px, worst %.0f px, over %d of %d points\n",
-        es.median, worst, sw.n_gaze_ok, GZ_CAL_POINTS);
+    /* The raw line is deliberately labelled rather than left to be read as the
+     * result. With a correction loaded it is the BEFORE figure, and it always
+     * says OUTSIDE ONE DEGREE, so an operator who stops reading here concludes
+     * a passing run failed. The verdict that matters is printed last, by
+     * report_corrected. */
+    say("\n%smedian error %.0f px, worst %.0f px, over %d of %d points\n",
+        have_corr ? "BEFORE CORRECTION: " : "", es.median, worst,
+        sw.n_gaze_ok, GZ_CAL_POINTS);
     if (sw.nz > 0) say("eye distance |z| median %.0f mm\n", fabs(zs.median));
-    say("verdict: %s (target %.0f px, one degree at 600 mm)\n",
-        es.median <= GZ_ACC_TARGET_PX ? "WITHIN ONE DEGREE" : "OUTSIDE ONE DEGREE",
-        GZ_ACC_TARGET_PX);
-
     if (have_corr) {
+        say("this is the device's raw output, not the result. The corrected\n"
+            "figures are below.\n");
         report_corrected(&sw, scr, &corr);
     } else {
+        say("verdict: %s (target %.0f px, one degree at 600 mm)\n",
+            es.median <= GZ_ACC_TARGET_PX ? "WITHIN ONE DEGREE" : "OUTSIDE ONE DEGREE",
+            GZ_ACC_TARGET_PX);
         say("\nno host-side correction on disk. The numbers above are the device's\n"
             "raw output. Run `gaze-cal fit` to fit one.\n");
     }
@@ -1349,6 +1367,62 @@ int gz_cmd_accuracy(const char *sock, const char *cfg, const char *label,
 }
 
 /* ---------------- fit ---------------- */
+
+int gz_missing_cause(const int *paired, const double *eye_z, int n, double *out_med_z) {
+    double z[GZ_CAL_POINTS];
+    unsigned nz = 0;
+    int top_row_lost = 0, other_lost = 0;
+
+    if (n > GZ_CAL_POINTS) n = GZ_CAL_POINTS;
+    for (int i = 0; i < n; i++) {
+        if (paired[i]) {
+            /* A zero is the eyeless placeholder rather than a measurement, and
+             * fabs because the sign of z is the tracker's, not a distance. */
+            if (eye_z[i] != 0.0) z[nz++] = fabs(eye_z[i]);
+        } else if (i < 3) {
+            top_row_lost++;
+        } else {
+            other_lost++;
+        }
+    }
+
+    double med = nz > 0 ? gz_stat_of(z, nz).median : 0.0;
+    if (out_med_z != NULL) *out_med_z = med;
+
+    if (nz == 0 || !(med < GZ_FIT_TOO_CLOSE_MM)) return GZ_MISS_LIGHTS;
+    if (top_row_lost > 0 && other_lost == 0) return GZ_MISS_TOO_CLOSE;
+    return GZ_MISS_CLOSE;
+}
+
+static void say_missing_points(const struct gz_sweep *sw) {
+    int paired[GZ_CAL_POINTS];
+    double z[GZ_CAL_POINTS];
+
+    say("missing:");
+    for (int i = 0; i < GZ_CAL_POINTS; i++) {
+        paired[i] = sw->pt[i].n_fit > 0;
+        z[i] = sw->pt[i].eye_mm[2];
+        if (!paired[i]) say(" %d(%.1f,%.1f)", i + 1, sw->pt[i].target[0], sw->pt[i].target[1]);
+    }
+    say("\n");
+
+    double med = 0;
+    int cause = gz_missing_cause(paired, z, GZ_CAL_POINTS, &med);
+    if (med > 0) say("eye distance |z| median over the points that did work: %.0f mm\n", med);
+
+    if (cause == GZ_MISS_TOO_CLOSE) {
+        say("YOU ARE TOO CLOSE. At %.0f mm the top row sits outside the tracker's\n"
+            "view, which is exactly why that row and only that row is missing.\n"
+            "Move back to about 600 mm, roughly where you play, and re-run.\n", med);
+    } else if (cause == GZ_MISS_CLOSE) {
+        say("You are at %.0f mm, closer than the ~600 mm playing position. Move\n"
+            "back and re-run. If points are still missing after that, turn the\n"
+            "room lights up, which this tracker needs.\n", med);
+    } else {
+        say("Turn the room lights on and re-run: with them off this tracker loses\n"
+            "the top-left point entirely, and that has cost three runs already.\n");
+    }
+}
 
 static const char *fit_err_text(int rc) {
     switch (rc) {
@@ -1393,9 +1467,8 @@ int gz_cmd_fit(const char *sock, const char *cfg,
     if (sw.n_fit_ok != GZ_CAL_POINTS) {
         say("\nONLY %d OF %d POINTS carried both a gaze sample and an eye position.\n"
             "REFUSING TO FIT. A fit from a partial sweep encodes which points were\n"
-            "missing rather than the gain. Turn the room lights on and re-run: with\n"
-            "them off this tracker loses the top-left point entirely.\n",
-            sw.n_fit_ok, GZ_CAL_POINTS);
+            "missing rather than the gain.\n", sw.n_fit_ok, GZ_CAL_POINTS);
+        say_missing_points(&sw);
         log_close();
         return 1;
     }
@@ -1436,7 +1509,7 @@ int gz_cmd_fit(const char *sock, const char *cfg,
         return 1;
     }
 
-    if (gz_correction_save(&corr, &rep, rep.eye_z_mm) != 0) {
+    if (gz_correction_save(&corr, &rep, rep.eye_z_mm, mm_per_px) != 0) {
         log_close();
         return 1;
     }

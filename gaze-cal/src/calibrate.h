@@ -269,16 +269,41 @@ struct gz_fit_report {
 int gz_correction_fit(const struct gz_fit_input *in, int n, struct gz_rect area,
                       struct gz_correction *out, struct gz_fit_report *rep);
 
+/* Which cause to name when a sweep loses points, kept pure and separate from
+ * the printing so it can be tested against the sweep that got it wrong.
+ *
+ * Blaming the room lights for a proximity failure costs a human a five-minute
+ * round trip, and it has already done so: the run at 07:01 on 2026-07-27 lost
+ * the whole top row with the eye at 486 mm, and the message sent the user to
+ * the light switch. Below GZ_FIT_TOO_CLOSE_MM the top row leaves the trackbox,
+ * and the sweep that resolved all nine points sat at 586 mm. */
+#define GZ_FIT_TOO_CLOSE_MM 520.0
+
+#define GZ_MISS_LIGHTS    0    /* nothing in the data points at proximity */
+#define GZ_MISS_TOO_CLOSE 1    /* the top row alone is gone, and the head is close */
+#define GZ_MISS_CLOSE     2    /* the head is close, but that is not the pattern */
+
+/* `paired[i]` is nonzero where point i produced both a gaze sample and an eye
+ * position, and `eye_z[i]` is that point's eye distance in mm, read only where
+ * paired is nonzero. Writes the median distance over the paired points, or 0
+ * when there are none. The first three points are the top row, because
+ * GZ_CAL_PTS is row-major from the top left. */
+int gz_missing_cause(const int *paired, const double *eye_z, int n, double *out_med_z);
+
 int gz_correction_path(char *buf, size_t cap);
 
 /* Writes through a temporary file and renames, like the blob. `rep` may be
  * NULL; when present its numbers are appended as extra fit_* keys, which
- * gz_correction_parse does not model and therefore ignores. Returns 0, or -1
- * after printing why. */
+ * gz_correction_parse does not model and therefore ignores. `mm_per_px` turns
+ * the fit's millimetres into the pixels spec 4.1 names those keys in; the fit
+ * cannot do it itself, because it knows nothing about a panel's resolution.
+ * Returns 0, or -1 after printing why. */
 int gz_correction_save_to(const char *path, const struct gz_correction *c,
-                          const struct gz_fit_report *rep, double eye_z_mm);
+                          const struct gz_fit_report *rep, double eye_z_mm,
+                          double mm_per_px);
 int gz_correction_save(const struct gz_correction *c,
-                       const struct gz_fit_report *rep, double eye_z_mm);
+                       const struct gz_fit_report *rep, double eye_z_mm,
+                       double mm_per_px);
 
 /* Returns 1 when a usable correction was read, 0 when there is no file, and -1
  * when a file exists but is unusable, having said so on stderr. `want` is the

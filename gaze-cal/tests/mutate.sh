@@ -874,6 +874,29 @@ run_mutation "gaze paired with an eye it never had" calibrate.c \
     "        if (have_gaze && gz_sample_eye_mid(e, g, mid)) {" \
     "        if (have_gaze) {"
 
+# The diagnostic that decides what to tell a human whose sweep lost points.
+# Getting it wrong sends them to the light switch when they are simply sitting
+# too close, which has already cost a five-minute round trip.
+run_mutation "proximity never blamed" calibrate.c \
+    "    if (nz == 0 || !(med < GZ_FIT_TOO_CLOSE_MM)) return GZ_MISS_LIGHTS;" \
+    "    return GZ_MISS_LIGHTS;"
+
+run_mutation "proximity blamed at the playing distance" calibrate.c \
+    "    if (nz == 0 || !(med < GZ_FIT_TOO_CLOSE_MM)) return GZ_MISS_LIGHTS;" \
+    "    if (nz == 0) return GZ_MISS_LIGHTS;"
+
+run_mutation "the top row is not distinguished" calibrate.c \
+    "    if (top_row_lost > 0 && other_lost == 0) return GZ_MISS_TOO_CLOSE;" \
+    "    if (top_row_lost > 0) return GZ_MISS_TOO_CLOSE;"
+
+run_mutation "the eyeless zero counted as a distance" calibrate.c \
+    "            if (eye_z[i] != 0.0) z[nz++] = fabs(eye_z[i]);" \
+    "            z[nz++] = fabs(eye_z[i]);"
+
+run_mutation "residual provenance written in millimetres" calibrate.c \
+    "                            \"fit_median_resid_px=%.1f\\nfit_worst_resid_px=%.1f\\n\"," \
+    "                            \"fit_median_resid_mm=%.1f\\nfit_worst_resid_mm=%.1f\\n\","
+
 
 echo
 echo "killed=$killed  documented_survivors=$documented  unexpected_survivors=$unexpected"

@@ -1422,6 +1422,49 @@ static void test_collect_without_a_state_scopes_it_to_the_window(void) {
     gz_client_close(&c);
 }
 
+static void test_missing_points_name_proximity_not_the_lights(void) {
+    /* The real sweep this exists for: `gaze-cal fit` at 07:01 on 2026-07-27
+     * lost points 1, 2 and 3 with the eye at 467 to 500 mm, and the message
+     * sent the human to the light switch. These are that run's own numbers,
+     * copied from the log. */
+    const int paired[GZ_CAL_POINTS] = { 0, 0, 0, 1, 1, 1, 1, 1, 1 };
+    const double z[GZ_CAL_POINTS] = {
+        0, 0, 0, 499.77, 477.05, 482.73, 489.31, 467.67, 491.26
+    };
+    double med = 0;
+    assert(gz_missing_cause(paired, z, GZ_CAL_POINTS, &med) == GZ_MISS_TOO_CLOSE);
+    assert(fabs(med - 486.02) < 0.01);
+
+    /* Same losses at the playing distance is not proximity, so it is the
+     * lights, which is what the old message always said. */
+    const double far_z[GZ_CAL_POINTS] = { 0, 0, 0, 586, 586, 586, 586, 586, 586 };
+    assert(gz_missing_cause(paired, far_z, GZ_CAL_POINTS, &med) == GZ_MISS_LIGHTS);
+    assert(fabs(med - 586.0) < 0.01);
+
+    /* Close, but the missing points are not the top row, so the geometry does
+     * not explain it on its own. */
+    const int scattered[GZ_CAL_POINTS] = { 1, 0, 1, 1, 0, 1, 1, 1, 1 };
+    const double close_z[GZ_CAL_POINTS] = { 480, 0, 480, 480, 0, 480, 480, 480, 480 };
+    assert(gz_missing_cause(scattered, close_z, GZ_CAL_POINTS, &med) == GZ_MISS_CLOSE);
+
+    /* Nothing paired at all: no distance was measured, so proximity cannot be
+     * claimed and the lights are the honest guess. */
+    const int none[GZ_CAL_POINTS] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const double nz[GZ_CAL_POINTS] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    med = 999;
+    assert(gz_missing_cause(none, nz, GZ_CAL_POINTS, &med) == GZ_MISS_LIGHTS);
+    assert(med == 0.0);
+
+    /* The boundary is exclusive, and a paired point carrying a zero distance is
+     * the eyeless placeholder rather than a head against the screen. */
+    const int one_paired[GZ_CAL_POINTS] = { 0, 0, 0, 1, 0, 0, 0, 0, 0 };
+    const double at_bound[GZ_CAL_POINTS] = { 0, 0, 0, GZ_FIT_TOO_CLOSE_MM, 0, 0, 0, 0, 0 };
+    assert(gz_missing_cause(one_paired, at_bound, GZ_CAL_POINTS, &med) == GZ_MISS_LIGHTS);
+    const double zero_z[GZ_CAL_POINTS] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    assert(gz_missing_cause(one_paired, zero_z, GZ_CAL_POINTS, &med) == GZ_MISS_LIGHTS);
+    assert(med == 0.0);
+}
+
 static void test_correction_file_round_trips(void) {
     const char *p = tmp_path("corr");
     unlink(p);
@@ -1438,7 +1481,9 @@ static void test_correction_file_round_trips(void) {
     rep.median_resid_mm = 8.5;
     rep.worst_resid_mm = 17.25;
 
-    assert(gz_correction_save_to(p, &c, &rep, 598.0) == 0);
+    /* 590.42 mm over 2560 px, the gameplay monitor. */
+    const double mm_per_px = 590.42 / 2560.0;
+    assert(gz_correction_save_to(p, &c, &rep, 598.0, mm_per_px) == 0);
 
     struct gz_correction back;
     assert(gz_correction_load_from(p, corr_area(), &back) == 1);
@@ -1456,7 +1501,10 @@ static void test_correction_file_round_trips(void) {
     assert(strstr(text, "fit_utc=") != NULL);
     assert(strstr(text, "fit_points=9") != NULL);
     assert(strstr(text, "fit_eye_z_mm=598.0") != NULL);
-    assert(strstr(text, "fit_median_resid_mm=8.500") != NULL);
+    /* Pixels, per spec 4.1: 8.5 mm over 0.2306 mm/px is 36.9 px. */
+    assert(strstr(text, "fit_median_resid_px=36.9") != NULL);
+    assert(strstr(text, "fit_worst_resid_px=74.8") != NULL);
+    assert(strstr(text, "resid_mm") == NULL);
 
     char tmp[512];
     snprintf(tmp, sizeof tmp, "%s.tmp", p);
@@ -1476,7 +1524,7 @@ static void test_correction_load_gates_on_the_display_area(void) {
     c.gx = 1.1713; c.gy = 1.1624; c.bx = -0.0043; c.by = -0.1487;
     c.area = corr_area();
     c.valid = 1;
-    assert(gz_correction_save_to(p, &c, NULL, 598.0) == 0);
+    assert(gz_correction_save_to(p, &c, NULL, 598.0, 590.42 / 2560.0) == 0);
 
     struct gz_correction back;
     assert(gz_correction_load_from(p, corr_area(), &back) == 1);
@@ -1593,6 +1641,7 @@ int main(void) {
     test_fit_residual_is_the_corrected_error();
     test_collect_pairs_the_gaze_with_the_eye_midpoint();
     test_collect_without_a_state_scopes_it_to_the_window();
+    test_missing_points_name_proximity_not_the_lights();
     test_correction_file_round_trips();
     test_correction_load_gates_on_the_display_area();
     test_correction_load_separates_absent_from_broken();

@@ -48,16 +48,19 @@ pause() {
     read -r -p "Press Enter when you are settled. " _
 }
 
-pause "Room lights ON. Sit exactly where you play, and stay there for the
-next two sweeps. Look at each white dot as it appears."
+pause "Room lights ON. Sit exactly where you play, about 600 mm from the
+screen and no closer: nearer than about 520 mm the top row of dots
+leaves the tracker's view and the fit will refuse. Stay put for the
+next two sweeps, and look at each white dot as it appears."
 
 "$CLI" fit
 fit_rc=$?
 if [ "$fit_rc" -ne 0 ]; then
     echo
     echo "THE FIT DID NOT PRODUCE A CORRECTION (exit $fit_rc). Nothing was stored."
-    echo "The most common cause is a point the tracker could not see. Turn the"
-    echo "room lights up and run this script again."
+    echo "Read the reason printed just above: it names which points were missing"
+    echo "and, from the eye distance it measured, whether the cause was proximity"
+    echo "or the room lights. Fix that one thing and run this script again."
     exit "$fit_rc"
 fi
 

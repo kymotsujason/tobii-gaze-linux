@@ -36,12 +36,17 @@ import sys
 
 DEFAULT_LOG = "~/.local/share/tobii-gaze/gaze-cal.log"
 
-# The measured display area and the gameplay monitor. Both are pinned rather
-# than parsed so a log written against a different geometry cannot be scored
-# against these numbers by accident; the checks below refuse instead.
+# The measured display area and the gameplay monitor, pinned rather than parsed.
+# check_geometry() below refuses a log that was not recorded against them: this
+# project has already been bitten once by numbers taken from the wrong monitor,
+# and every millimetre and pixel figure printed here depends on these.
 AREA_W_MM, AREA_H_MM = 590.42, 333.72
 AREA_OX_MM, AREA_OY_MM = -295.21, 5.0
 SCREEN_W_PX, SCREEN_H_PX = 2560, 1440
+
+# Half a millimetre of eye position, well inside the sensor's own noise and far
+# tighter than any real panel difference.
+GEOMETRY_TOL = 0.5 / AREA_W_MM
 
 HDR = re.compile(r"^===== (\S+)(?: label=(\S+))?\s+(\S+ \S+) =====")
 PT = re.compile(
@@ -92,31 +97,104 @@ def pick(sweeps, spec):
     return hits[want - 1]
 
 
-def ols(vs, us):
-    n = len(vs)
-    mv, mu = sum(vs) / n, sum(us) / n
-    svv = sum((v - mv) ** 2 for v in vs)
+def check_geometry(sweep):
+    """Refuse a sweep recorded against a different panel.
+
+    gaze-cal writes both the eye position in tracker mm and the projection it
+    derived from the display area, so recomputing the second from the first with
+    the constants above is a direct test of whether that area is this one. A
+    mismatch means every mm and px figure printed here would be wrong.
+    """
+    for i in sorted(sweep["pts"]):
+        p = sweep["pts"][i]
+        want = ((p["eye"][0] - AREA_OX_MM) / AREA_W_MM,
+                (AREA_OY_MM + AREA_H_MM - p["eye"][1]) / AREA_H_MM)
+        if (abs(want[0] - p["eproj"][0]) > GEOMETRY_TOL or
+                abs(want[1] - p["eproj"][1]) > GEOMETRY_TOL):
+            sys.exit(
+                "sweep %r point %d was recorded against a different display area.\n"
+                "  logged eproj    %.6f %.6f\n"
+                "  from %.2f x %.2f at (%.2f, %.2f)  %.6f %.6f\n"
+                "REFUSING: every millimetre and pixel figure here depends on that "
+                "geometry." % (sweep["label"], i, p["eproj"][0], p["eproj"][1],
+                               AREA_W_MM, AREA_H_MM, AREA_OX_MM, AREA_OY_MM,
+                               want[0], want[1]))
+
+
+def ols(vs, us, use):
+    n = sum(1 for k in use if k)
+    if n < 3:
+        sys.exit("fewer than three usable points; nothing to fit")
+    mv = sum(v for v, k in zip(vs, use) if k) / n
+    mu = sum(u for u, k in zip(us, use) if k) / n
+    svv = sum((v - mv) ** 2 for v, k in zip(vs, use) if k)
     if svv <= 1e-9:
         sys.exit("the targets do not span an axis; nothing to fit")
-    slope = sum((v - mv) * (u - mu) for v, u in zip(vs, us)) / svv
+    slope = sum((v - mv) * (u - mu) for v, u, k in zip(vs, us, use) if k) / svv
     return slope, mu - slope * mv
 
 
 def fit(sweep):
-    """Two univariate OLS of (reported - E_proj) on (target - E_proj)."""
+    """The same fit gz_correction_fit performs, including its outlier rule.
+
+    This must mirror the shipped C exactly. If `gaze-cal fit` rejected a point
+    and this tool did not, spec test 5.3 would be decided against gains that are
+    not the ones in correction.conf, and the verdict could flip in a marginal
+    case.
+    """
+    check_geometry(sweep)
     pts = [sweep["pts"][i] for i in sorted(sweep["pts"])]
     if len(pts) != 9:
         sys.exit("%s has %d points; a fit needs all nine (do-not #9)"
                  % (sweep["label"], len(pts)))
-    out = {}
-    for axis in (0, 1):
-        vs = [p["target"][axis] - p["eproj"][axis] for p in pts]
-        us = [p["gaze"][axis] - p["eproj"][axis] for p in pts]
-        out["g" if axis == 0 else "gy"], out["b" if axis == 0 else "by"] = ols(vs, us)
-    g = (out["g"], out["gy"])
-    b = (out["b"], out["by"])
+
+    v = [[p["target"][a] - p["eproj"][a] for p in pts] for a in (0, 1)]
+    u = [[p["gaze"][a] - p["eproj"][a] for p in pts] for a in (0, 1)]
+    use = [True] * len(pts)
+    rejected = [False] * len(pts)
+
+    g = b = resid = None
+    for second_pass in (False, True):
+        g = [0.0, 0.0]
+        b = [0.0, 0.0]
+        for a in (0, 1):
+            g[a], b[a] = ols(v[a], u[a], use)
+        if g[0] <= 0 or g[1] <= 0:
+            sys.exit("the fit produced a non-positive gain; the sweep is unusable")
+
+        # Corrected-minus-target in mm, not the regression residual: they differ
+        # by the factor g, and the C fit rejects on the first.
+        resid = []
+        for i, p in enumerate(pts):
+            cor = correct(g, b, p["eproj"], p["gaze"])
+            resid.append(math.hypot((cor[0] - p["target"][0]) * AREA_W_MM,
+                                    (cor[1] - p["target"][1]) * AREA_H_MM))
+        if second_pass:
+            break
+
+        kept = sorted(r for r, k in zip(resid, use) if k)
+        med = kept[len(kept) // 2] if len(kept) % 2 else \
+            (kept[len(kept) // 2 - 1] + kept[len(kept) // 2]) / 2
+        if med <= 1e-6:
+            break                       # a perfect fit must not reject itself
+        drops = [i for i, (r, k) in enumerate(zip(resid, use)) if k and r > 3.0 * med]
+        if not drops:
+            break
+        if len(drops) > 1:
+            sys.exit("%s: %d points sit past 3x the median residual. gaze-cal fit "
+                     "would have refused this sweep outright, so there is nothing "
+                     "here to score against." % (sweep["label"], len(drops)))
+        use[drops[0]] = False
+        rejected[drops[0]] = True
+        # First-pass residuals, which is what the rule is applied to. gaze-cal
+        # prints the post-refit numbers instead, so the two differ in the
+        # message while agreeing exactly on which point goes and on the gains
+        # that come back.
+        print("  rejected point %d as an outlier (%.1f mm against a %.1f mm median"
+              " before the refit), refitting" % (drops[0] + 1, resid[drops[0]], med))
+
     ep = tuple(sum(p["eproj"][a] for p in pts) / len(pts) for a in (0, 1))
-    return g, b, ep
+    return tuple(g), tuple(b), ep, rejected, resid, use
 
 
 def correct(g, b, eproj, reported):
@@ -177,12 +255,27 @@ def main():
                  "fitting and scoring on the same sweep measures nothing")
 
     fs, ss = pick(sweeps, args.fit_label), pick(sweeps, args.score_label)
-    g, b, ep_fit = fit(fs)
-
     print("fitted on   %-24s %s" % (fs["label"], fs["when"]))
     print("scored on   %-24s %s" % (ss["label"], ss["when"]))
+    g, b, ep_fit, rejected, fit_resid, used = fit(fs)
+    check_geometry(ss)
+
     print("\ngx %.5f  gy %.5f  bx %+.6f  by %+.6f  isotropy %.4f"
           % (g[0], g[1], b[0], b[1], g[0] / g[1]))
+    kept_resid = [r for r, k in zip(fit_resid, used) if k]
+    print("points used %d of 9%s, median residual on the fit sweep %.0f px" % (
+        sum(1 for k in used if k),
+        "" if not any(rejected) else
+        ", rejected " + ", ".join(str(i + 1) for i, r in enumerate(rejected) if r),
+        median(kept_resid) / AREA_W_MM * SCREEN_W_PX))
+    # The same envelope gz_correction_check enforces. A tool that scored an
+    # out-of-range fit would be answering a question the CLI never asked.
+    if not (1.05 <= g[0] <= 1.30 and 1.05 <= g[1] <= 1.30
+            and abs(g[0] / g[1] - 1.0) < 0.05):
+        print("  WARNING: this fit is outside the measured envelope"
+              " (1.05..1.30, isotropy 5 percent).")
+        print("  gaze-cal fit would have REFUSED it, so correction.conf does not"
+              " hold these numbers.")
     print("fit-time eye projection  %.4f %.4f" % ep_fit)
 
     rows = score(ss, g, b, ep_fit)
