@@ -53,15 +53,17 @@ Generate more with `scripts/task-brief PLAN_FILE N` from the skill directory.
 
 ## IMMEDIATE STATE — read before touching anything
 
-`git status` is dirty and that is expected:
-- `patches/0006-calibration-buffers.patch` exists but is **UNVERIFIED and UNCOMMITTED**.
-  Task 4's implementer wrote it and did not finish.
-- `vendor/tobiifree` has uncommitted edits, including `driver/src/tracker.zig` which is
-  surprising for a buffer-sizing task and should be checked.
+`git status` shows `vendor/tobiifree` dirty and that is expected: `./scripts/build.sh`
+leaves the patch series applied and staged inside the submodule.
+
+Task 4 is **done, reviewed, APPROVED, and a fix round is committed**. Its patch is
+`patches/0000-calibration-buffers.patch`, renumbered from `0006` so that it applies before
+the five patches that will be authored on top of it. The `driver/src/tracker.zig` edit in
+it is deliberate: it bounds a client-reachable overflow into `out_scratch` that raising
+`Client.buf` to 65536 would otherwise have widened. Do not delete or re-dispatch it.
 
 **Recovery is safe:** `./scripts/build.sh` resets the submodule to the pinned commit and
-reapplies every `patches/*.patch`. So either verify `0006` applies cleanly and finish
-Task 4, or delete it and re-dispatch Task 4 from its brief. Do not trust it unreviewed.
+reapplies every `patches/*.patch`.
 
 ## Task 3's Critical, fully specified
 

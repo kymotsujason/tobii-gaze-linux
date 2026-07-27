@@ -29,7 +29,7 @@ Spec section 13 lists three unknowns. All three resolve in this phase, and all t
 - **`driver/src/daemon_protocol.zig` at the pinned commit is the only source of truth for the wire protocol.** `ARCHITECTURE.md` is wrong about four opcodes, invents a `cal_retrieve` at `0x23` that is actually `cal_apply`, lists realm commands `0x10`-`0x13` that do not exist, and states the gaze payload is 232 bytes when it is 392.
 - **Upstream is never edited in place.** Every daemon change is a numbered `.patch` file under `patches/`, applied by the build. This preserves rebasing onto upstream and keeps the maintenance surface visible.
 - **Patch extraction workflow, used identically in Tasks 4 through 9.** `scripts/build.sh` applies all existing patches and then runs `git add -A` inside the vendor checkout. Make the task's edits on top of that state, then `git -C vendor/tobiifree diff` shows **only** the new work. Extract it, then re-run `scripts/build.sh` to prove the whole stack still applies from clean. Never `git checkout -- .` between tasks: that discards earlier patches from the working tree and makes the next diff capture them again.
-- **Patches are numbered by dependency order, not by the order tasks are done.** The build applies `0001` through `0008` in filename order every time, so the numbering must be a valid application sequence. It is: `0001` single-USB-owner and `0002` write-path touch disjoint functions, `0003` through `0006` touch startup and buffers, `0007` builds on `0002`'s `enqueue`, and `0008` builds on `0007`.
+- **Patches are numbered by dependency order, not by the order tasks are done.** The build applies `0000` through `0008` in filename order every time, so the numbering must be a valid application sequence. It is: `0000` calibration-buffers goes first because it was authored against the bare pin and every later patch is authored on top of it, `0001` single-USB-owner and `0002` write-path touch disjoint functions, `0003` through `0005` touch startup and the poll loop, `0007` builds on `0002`'s `enqueue`, and `0008` builds on `0007`.
 - **`validity == 0` means valid.** Inverting this is an easy C bug.
 - **Wire framing:** `[u8 msg_type][u32 LE payload_len][payload]`, header 5 bytes. **`response` (0x02) additionally prepends a one-byte `cmd_type`**, so its body starts at offset 6.
 - **A client that does not send `subscribe` (0x01) receives zero gaze samples, with no error.** Every connect and every reconnect must send it.
@@ -45,12 +45,12 @@ Spec section 13 lists three unknowns. All three resolve in this phase, and all t
 tobii-eye-tracker/
   vendor/tobiifree/            git submodule, pinned, never edited
   patches/                     P1..P9, applied by scripts/build.sh
+    0000-calibration-buffers.patch
     0001-single-usb-owner.patch
     0002-write-path.patch
     0003-force-display-area.patch
     0004-unplug-recovery.patch
     0005-poll-loop.patch
-    0006-calibration-buffers.patch
     0007-device-status-message.patch
     0008-pending-entry-lifetime.patch
   scripts/
@@ -311,7 +311,7 @@ git commit -m "feat: bring-up spike, gaze confirmed streaming on Linux"
 ## Task 4: P7 — enlarge the calibration buffers
 
 **Files:**
-- Create: `patches/0006-calibration-buffers.patch`
+- Create: `patches/0000-calibration-buffers.patch`
 - Modify (via patch): `vendor/tobiifree/driver/src/tobiifree_core.zig:1051`, `vendor/tobiifree/applications/tobiifreed/src/server.zig:18`, `vendor/tobiifree/applications/tobiifreed/src/main.zig` (`sendResult`)
 
 **Interfaces:**
@@ -359,14 +359,20 @@ if (space == 0) {
 }
 ```
 
-In `main.zig`'s `sendResult`, replace the fixed `[8192]u8` stack buffer with `[70000]u8` and add a guard:
+In `main.zig`'s `sendResult`, size the stack buffer to `proto.HEADER_SIZE + 1 + 4096` and add a guard bounding the payload against `core.scratch_size()`:
 
 ```zig
-if (payload.len + proto.HEADER_SIZE + 1 > buf.len) {
-    log.err("response payload {d} exceeds buffer", .{payload.len});
+var buf: [proto.HEADER_SIZE + 1 + 4096]u8 = undefined;
+const max_payload = core.scratch_size();
+if (payload.len > max_payload) {
+    log.err("response payload {d} exceeds maximum {d}", .{ payload.len, max_payload });
+    sendResult(client_fd, cmd_type, is_ws, false, &.{});
     return;
 }
+std.debug.assert(max_payload + proto.HEADER_SIZE + 1 <= buf.len);
 ```
+
+Do not mirror this buffer against `Client.buf`. Inbound is capped by whatever a client may send, hence 65536, while outbound is capped by `out_scratch` at 4096, so the two are bounded by different things and must not be sized alike.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -376,15 +382,15 @@ Expected: PASS
 - [ ] **Step 5: Extract the patch and rebuild from clean**
 
 ```bash
-git -C vendor/tobiifree diff > patches/0006-calibration-buffers.patch
+git -C vendor/tobiifree diff > patches/0000-calibration-buffers.patch
 ./scripts/build.sh   # re-applies the whole stack from clean, then re-stages
 ```
-Expected: `applying 0006-calibration-buffers.patch` then a successful build.
+Expected: `applying 0000-calibration-buffers.patch` then a successful build.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add patches/0006-calibration-buffers.patch
+git add patches/0000-calibration-buffers.patch
 git commit -m "fix: enlarge calibration buffers (P7), 512B session_out overflowed on any real blob"
 ```
 

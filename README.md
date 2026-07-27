@@ -59,7 +59,7 @@ at build time and changes nothing in the upstream repository itself.
 
 | Patch | Upstream files touched | What it changes |
 |---|---|---|
-| `0006-calibration-buffers.patch` | `driver/src/tobiifree_core.zig`, `driver/src/tracker.zig`, `applications/tobiifreed/src/main.zig`, `applications/tobiifreed/src/server.zig` | Enlarges the calibration buffers and bounds the calibration blob against the 4096-byte scratch buffer. `session_out` was 512 bytes, which overflowed on any blob past roughly 478 bytes. |
+| `0000-calibration-buffers.patch` | `driver/src/tobiifree_core.zig`, `driver/src/tracker.zig`, `applications/tobiifreed/src/main.zig`, `applications/tobiifreed/src/server.zig` | Enlarges the calibration buffers and bounds the calibration blob against the 4096-byte scratch buffer. `session_out` was 512 bytes, which overflowed on any blob past roughly 478 bytes. Also bounds the two daemon response buffers against what can actually reach them. |
 
 The series grows as Phase 1 proceeds, and the numbering is a valid application order
 rather than the order the work was done.

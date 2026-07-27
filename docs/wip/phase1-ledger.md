@@ -207,3 +207,24 @@ STALE BRIEFING CORRECTED: the handoff said Task 4's patch was quarantined at
   back to patches/0006-calibration-buffers.patch with a stronger bound (asserts
   against core.scratch_size(), not buf.len). So Task 4 is IMPLEMENTED AND COMMITTED
   but has NO REVIEW VERDICT. It needs review, not re-dispatch.
+Task 4: REVIEWED, APPROVED (task-4-review-verdict.md), then a four-change fix round.
+  RENUMBERED: patches/0006-calibration-buffers.patch is now
+  patches/0000-calibration-buffers.patch. Every 0006 reference above is historical; the
+  file has not existed under that name since this entry. Reason: 0006 was authored
+  against the bare pin, but all five remaining patches (0001-0005) will be authored on
+  top of it and would have been APPLIED before it. Five context inversions, removed by
+  a rename.
+  onResponse (main.zig) got the guard sendResult already had. Its payload_len is the
+    device's TTP plen, bounded only by ACC_CAP = 2 MiB, and encodeResponse memcpys with
+    no length check, so a frame declaring plen=100000 smashed an 8198-byte stack frame.
+    Bound is MAX_RESPONSE_PAYLOAD = 8192, with the buffer defined in terms of it.
+  sendResult's buffer shrank 70000 -> 4096 payload bytes. Measured in the ReleaseSafe
+    binary: frame 0x111b8 (70072) -> 0x1048 (4168), and the per-call 0xaa undefined-fill
+    memset shrank with it. The 70000 came from mirroring the 65536 inbound Client.buf,
+    but inbound is capped by what a client may send and outbound by out_scratch at 4096.
+    Plan text corrected so Tasks 5-8 do not inherit the conflation.
+  Both rejection paths now send an error frame instead of returning silently, so a client
+    that trips a guard fails fast rather than waiting on the Task 11 watchdog.
+  25/25 driver tests (was 24). The new one feeds a 100000-byte response frame through
+    feed_usb_in and asserts on_response receives it intact, proving the guard's
+    precondition is real rather than assumed.

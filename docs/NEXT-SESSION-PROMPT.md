@@ -26,10 +26,10 @@ Two things are waiting, in this order:
    temp log, and a bounded wait instead of the current unbounded one. Full detail is in
    docs/RESUME-phase1.md.
 
-2. Task 4 is half-done. Its extracted patch is quarantined at
-   docs/wip/task4-0006-calibration-buffers.UNVERIFIED.patch.txt, deliberately outside
-   patches/ so build.sh cannot apply it unreviewed. Either verify it against the task 4
-   brief and move it into patches/, or discard it and re-dispatch task 4 fresh.
+2. Task 4 is done and APPROVED, with a fix round committed on top. The quarantine at
+   docs/wip/task4-0006-calibration-buffers.UNVERIFIED.patch.txt was resolved: the patch
+   now lives at patches/0000-calibration-buffers.patch, renumbered from 0006 so it applies
+   before the five patches that get authored on top of it. Nothing to re-dispatch.
 
 Task briefs for 4 through 9 are already extracted in
 .superpowers/sdd/2026-07-26-phase1-bringup-and-daemon/. Generate more with the skill's
