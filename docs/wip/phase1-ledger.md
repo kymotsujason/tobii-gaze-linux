@@ -752,3 +752,39 @@ Task 10: CARRY TO TASK 11: GZ_MAX_PAYLOAD is 65536 as specified though the daemo
 Task 10: CLAUDE.md corrected by controller on two counts the implementer flagged: the
   1500x1000 placeholder is gone and the device holds the real 597x336, and the
   display_area-frame myth is now recorded as a myth.
+Task 10: review APPROVED, no Critical, two Important, fix round dispatched.
+  All four deviations INDEPENDENTLY CONFIRMED. The display_area one was proven statically,
+  not just live: daemon_protocol.zig has exactly four server encoders
+  (encodeGaze/Status/Response/Error) and Srv.display_area reaches encodeHeader NOWHERE in
+  driver/ or applications/tobiifreed/. So the brief was wrong twice over, since
+  `len == 9*sizeof(double)` would reject nothing today and reject every real frame if 0x03
+  ever shipped.
+  The reviewer also recomputed all 23 GazeSample offsets BY HAND from the Zig extern struct
+  (total 392, unfiltered at 376) and diffed all 22 GZ_BIT_* against tobiifree_core.zig:
+  1093-1114 and every opcode against Cmd/Srv: exact. No test covers the bit values, so that
+  hand-check is currently the only evidence for them.
+  Offset-6 and validity are genuinely load-bearing: the offset-5 mutant fails at
+  test_proto.c:117 and the inverted-validity mutant at test_proto.c:456.
+Task 10: IMPORTANT 1: proto.h does not compile as C++. g++ rejects _Static_assert outright
+  and there are no extern "C" guards, so Plan 2's OBS plugin, the named consumer of this
+  exact file, cannot include it, and patching only the assert would leave the declarations
+  mangled and unlinkable against a C-built proto.o.
+Task 10: IMPORTANT 2: GZ_MAX_PAYLOAD is exported without a GZ_MAX_FRAME, so a frame the
+  parser calls well-formed can need 65541 accumulator bytes while Task 11's gz_client_feed
+  returns RECONNECT on overflow. A 64 KiB client would reconnect-loop forever on a frame
+  proto told it was valid.
+Task 10: honesty correction: "the suite catches all 25" counts an ALLOW_SURVIVE mutant as
+  caught. Truth is 24 caught, 1 documented survivor, 0 unexpected. Four further mutants
+  survive that the set does not contain, so the set is meaningful but incomplete.
+Task 10: CARRY TO TASK 11, from the reviewer: 0 means incomplete and -1 means desync, so
+  `if (r <= 0)` is a BUG; f.body points into the caller's buffer and DANGLES across
+  compaction; size the input buffer >= 65541 or fix Important 2; gz_frames_dropped cannot
+  tell counter rollover (about a year at 33.2 Hz) from a counter RESET on reconnect, which
+  would report about 1e9 dropped, so reset the state on reconnect; and restore
+  .DEFAULT_GOAL := $(BUILD)/gaze-cal.
+Task 10: PLAN CORRECTED for Task 12, which was built on a false premise. Its brief assumes
+  nine f64 arrive on the wire. They do not. The readback is a response 0x02 with cmd_type
+  0x02 and a ~164-byte RAW TTP TLV body, so before gz_corners_to_rect has any input at all
+  Task 12 must port decode_display_area (tobiifree_core.zig:445: skip a 2-byte prolog, then
+  three readPoint3d reads of Q42 fixed point) into C. That means a small TLV READER THE
+  PLAN NEVER BUDGETED FOR. Plan text updated.

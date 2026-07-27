@@ -1296,7 +1296,23 @@ git commit -m "feat: gaze-cal client with mandatory subscribe, desync detection 
 - Consumes: `gz_client_*` from Task 11
 - Produces: `gz_display_verify()`, which blocks the pipeline on a mismatch
 
-Spec section 3 step 3. `get_display_area` returns **nine f64 corner coordinates** (`tl`, `tr`, `bl` in tracker-space mm), not the `w_mm/h_mm/z_mm/tilt` the config accepts, so the assertion needs a conversion.
+Spec section 3 step 3. `get_display_area` yields **nine f64 corner coordinates** (`tl`, `tr`, `bl` in tracker-space mm), not the `w_mm/h_mm/z_mm/tilt` the config accepts, so the assertion needs a conversion.
+
+**CORRECTED AFTER MEASUREMENT, and this changes the task's scope.** Those nine doubles do
+NOT arrive on the wire as nine doubles, and there is no `display_area` frame at all.
+`daemon_protocol.zig` has exactly four server encoders, and `Srv.display_area` (0x03)
+reaches `encodeHeader` nowhere in the daemon. A `get_display_area` reply comes back as a
+**`response` (0x02) with `cmd_type` 0x02 and a roughly 164-byte raw TTP body**, confirmed
+against a live daemon in Task 10 and confirmed statically in its review. So the reply body
+is TTP TLV, not an array of doubles.
+
+Consequence: before `gz_corners_to_rect` has any input at all, this task must port
+`decode_display_area` (`tobiifree_core.zig:445`, which skips a 2-byte prolog then does
+three `readPoint3d` reads of Q42 fixed point) into C, which means **a small TLV reader
+this plan never budgeted for**. Treat that as part of Step 1, and write its tests the same
+way Task 10 wrote its parser tests, since a silent misparse here produces a
+wrong-but-plausible geometry, which is the exact failure the whole display-area chain
+exists to prevent.
 
 - [ ] **Step 1: Write the failing test**
 
