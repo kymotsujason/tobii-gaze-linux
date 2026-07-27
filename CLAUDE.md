@@ -84,9 +84,22 @@ applies from the pin, then commit the `.patch` to the outer repo.
 **Never `git checkout -- .` inside the submodule between steps** (it restores from the
 index, which `git add -A` has dirtied) and **never commit inside `vendor/`**.
 
-Build: `./scripts/build.sh`. Zig comes from `nix develop` and is not on the system PATH,
-so run Zig commands as
-`nix develop /home/jason/Documents/tobii-eye-tracker/vendor/tobiifree --command bash -c "..."`.
+**Amending an existing patch uses a different command, and getting it wrong silently
+truncates the patch.** Step 4 above stages everything, so a plain `git diff` yields only
+the delta since the last apply. Extract an amendment with `git -C vendor/tobiifree diff
+HEAD`, or with `git -C vendor/tobiifree diff HEAD -- <paths>` when the task splits its work
+across numbered patches by path. This has nearly shipped patches that cannot apply from a
+clean pin twice, once at 14 lines instead of 24 and once at 142 instead of 382. Both times
+the tell was the line count collapsing against the previous round, so compare it. The real
+proof is stronger and cheap: `git archive` the pin into a scratch tree, apply every patch
+in filename order, and `diff -r` against `vendor/tobiifree`. It must be byte identical.
+
+Build: `./scripts/build.sh`. Zig normally comes from `nix develop` and is not on the system
+PATH. If `nix` is broken, `build.sh` falls back to a Zig 0.15.x in `/nix/store`, in `$ZIG`,
+or on `PATH`, and prints which it chose. To run Zig directly when nix is down, use the
+store binary and pin libusb to the store too, because a store Zig stamps the store loader
+as the output's `PT_INTERP` and that loader does not search `/usr/lib`:
+`PKG_CONFIG_PATH=/nix/store/*-libusb-*-dev/lib/pkgconfig /nix/store/*-zig-0.15.*/bin/zig ...`
 
 ## Working conventions
 
@@ -101,6 +114,15 @@ so run Zig commands as
   exists because closing early twice let a Critical and an Important slip through.
 - When a number matters, ask where it came from. Almost every defect found in this project
   so far has been a provenance failure rather than a logic error.
+- **Reviewers must write their verdict to a file**, not only return it. Three consecutive
+  Opus reviewers ended without returning anything while implementer messages arrived
+  normally, and their work was unrecoverable. A file survives a lost message.
+- **Treat code quoted in the plan as a draft, not as gospel.** Three plan-mandated blocks
+  have now been wrong, and testing caught each one where reading did not: Task 6's pause
+  handshake was a measured regression (unpatched served 4000/4000, the plan's version
+  200/4199), Task 7's `enqueue` had a reachable out-of-bounds `memcpy`, and Task 8's
+  reconnect path had a NULL dereference plus two hooks it never restored. Implement the
+  intent, verify the behaviour, and deviate loudly with the measurement that justifies it.
 
 ## Things that bite
 
