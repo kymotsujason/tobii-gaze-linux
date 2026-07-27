@@ -1597,3 +1597,36 @@ STANDING HARDWARE LIMIT, worth keeping: at this user's closest seating positions
   still applies when playing closer, but gaze near the top of the screen will drop out when
   the user leans in, and that is a property of the tracker's cone rather than anything
   software can fix. Phase 2 must treat gaze dropout as a normal state, not an error.
+Task 13b: implemented (3b53613), reviewed APPROVED with no Critical and no Important, fix
+  round (812ee99) for four review minors plus one of mine, re-review ALL FIXES ADDRESSED.
+  CODE SIDE IS COMPLETE. Only the hardware acceptance run remains, which the human is doing.
+  HOLD-OUT RESULT, reproduced independently by the reviewer from the log rather than taken
+  from the report: fit on one nine-point sweep and score on a DIFFERENT one, over all 30
+  ordered pairs of the six full sweeps, median 34.0 px (implementer reported 33.9), range
+  15.3 to 48.4, all under 50, none above the 80 px falsifier, against an uncorrected 265 px
+  computed the same way (implementer 267). Per-sweep gains 1.1562 to 1.1828, isotropy 0.9991
+  to 1.0148. No leak: the fit sees only sweep A, the outlier rule rejected nothing in any of
+  the six so it cannot leak through, and the self-fit diagonal at 27.5 to 36.7 px is barely
+  better than the hold-out, which is what the ABSENCE of overfitting looks like.
+  HONEST LIMITATION, stated by the reviewer: effective independence is SIX, not thirty, and
+  weaker than six in practice, since four of the six fall inside 80 seconds and all six are
+  one user, one session, one seating position at z 580-620. So 34 px measures SHORT-TERM
+  REPEATABILITY of the gain and says nothing about transfer across positions. Cross-cluster
+  pairs alone (n=18) give median 33.6 and max 40.8, so temporal clustering is not flattering
+  it. The human's verify and lateral sweeps are what test transfer.
+  SPEC ERROR CONFIRMED, and it would have wasted a human trip: spec test 5.3 asks for a
+  seating change in DEPTH, but E_proj is a function of E_mid.x and E_mid.y only, and
+  H - S = ((g-1)/g)(E_apply - E_fit), so a pure depth change is EXACTLY ZERO. The separating
+  move is lateral or vertical at 0.634 px/mm. Only the human instruction changed.
+  MY libm CONCERN WAS UNFOUNDED: nm -u on proto.o is IDENTICAL before and after this task
+  (atan2, hypot, memcpy, sincos, __stack_chk_fail), those symbols come from the pre-existing
+  corner conversions, and the Makefile has carried -lm with a comment since before the task.
+  proto.c is not even in the fix diff.
+  F1 CROSS-CHECK verified independently by the re-reviewer on its own synthetic data: C and
+  Python agree at gx 1.17130 gy 1.16240 bx -0.004300 by -0.102000, agree on rejecting a
+  displaced point 5, agree on refusing at two outliers, agree on the zero-median guard, and
+  cannot diverge on ties since both use strict > against 3.0 * med.
+  THE REFUSAL STILL REFUSES: the n_fit_ok != GZ_CAL_POINTS check is a CONTEXT line in the
+  diff, so only the message text changed and the return-1 nothing-written path is untouched.
+  make check exit 0, killed=174 documented=7 unexpected=0, up from 169/7/0, five new
+  mutations all killed. correction.conf still absent because no fit has yet succeeded.
