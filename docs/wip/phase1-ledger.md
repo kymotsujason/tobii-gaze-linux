@@ -1678,3 +1678,30 @@ ANOMALY WORTH WATCHING: on the verify sweep the CENTRE point (pt 5) corrected WO
   raw, 118 px to 177 px, and was the worst point of the nine while every other point
   improved by 5 to 15x. It also carried n=18 frames rather than 20. One point, one sweep,
   but the centre is the last place an outward-scaling correction should hurt.
+SPEC TEST 5.3 DECIDED, 2026-07-27, with a REAL 112.6 mm in-plane head move (the earlier
+  attempt moved 4 mm and the tool honestly called it inconclusive).
+    fit-time eye projection   0.5265 0.9818
+    score-time eye projection 0.7173 0.9085  -> moved +112.6, +24.4 mm in the screen plane
+    predicted separation 77 px at 0.664 px per mm
+    median  raw 253 px   form H 69 px   form S 52 px
+    worst   raw 366 px   form H 107 px  form S 102 px
+  FORM S WINS. The scale centre is NOT the eye, so section 1.3a's risk was real and the
+  head-aware term is WRONG. The correction must be a STATIC transform.
+  This also explains the live figure: the shipped form H corrected to 69 px at the moved
+  position, OUTSIDE one degree, where form S would have held 52 px. At the FITTED position
+  form H measured 37 px, so form H degrades specifically with head movement, which is
+  exactly what form S removes and exactly what the test existed to detect.
+  Switch to form S dispatched, refitting from the RECORDED sweeps rather than costing the
+  human more hardware time. fit#9 (07:34:54) is the sweep correction.conf came from, and
+  verify-normal#1, lateral#1 and lateral2 all carry per-point eye origins.
+  Asked for: the three refusals kept intact (partial sweep, gain envelope, isotropy at
+  +/-5 percent), every recorded sweep re-scored under form S with lateral2 as the real test,
+  a form field in correction.conf so a stale form H file cannot be silently misread, and the
+  acceptance band and message text updated since the current wording was written for form H.
+STATE OF THE ACCURACY WORK AT THIS POINT, for anyone resuming:
+  raw device output        ~250-285 px   (5.5 to 6.3 degrees)
+  form H at fitted position     37 px    WITHIN one degree
+  form H after a 112 mm move    69 px    outside
+  form S after the same move    52 px    the form to ship
+  correction.conf currently holds FORM H parameters gx 1.17213 gy 1.18952 bx -0.014093
+  by -0.062792, fitted from fit#9, and is superseded once form S lands.
