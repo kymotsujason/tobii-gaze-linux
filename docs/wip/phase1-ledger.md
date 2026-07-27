@@ -978,3 +978,51 @@ Task 12: concerns recorded: gz_tlv_read_u32 is tested API with no production cal
   is asserted rather than measured and --tol 0 passes today; and the gate explicitly does
   NOT cover unmeasured z_mm, tilt, cx or cy, which the CLI prints as a caveat on every
   success.
+Task 12: review CHANGES REQUIRED, one Important, three Minors. Spec MET, brief's code
+  superseded on evidence, all four deviations UPHELD.
+  GRAMMAR CONFIRMED INDEPENDENTLY, with arithmetic rather than trust: tlv.zig:157 gives
+  point3d = prolog(0x031f41) + 3x readFixed22x42, where the prolog is [5][BE 4][tag] = 9
+  bytes and each Q42 is [4][BE 8][i64] = 13, so point3d = 48 and 2 + 144 + 9 + 9 = 164.
+  tobiifree_core.zig:445 skips 2, reads three, ignores the trailer. The reviewer also
+  decoded the da_real fixture BY HAND (0x0004aa<<40 / 2^42 = 298.5, 0x0568<<40 = 346,
+  0x28<<40 = 10) to prove it is a REAL CAPTURE, not a synthesis.
+  DEVIATION (a) UPHELD TERM BY TERM against tracker.zig:118-130, where tl.y = oy + h cos t,
+  tl.z = z + h sin t and bl = (ox,oy,z). The brief's h is really h cos t and is 8 mm short
+  at 12.5 degrees, its z is the TOP edge's z, and its atan2(bl.z-tl.z, h) yields -t. ONLY w
+  survived. The round-trip test runs at tilt -12.5 and is NOT circular: it restates
+  setDisplayArea's construction with its own cos/sin, then asserts each wrong variant
+  disagrees. Three mutations kill all three errors.
+  DEVIATION (b) UPHELD with numbers: the shipped config's cy "b - 10" gives oy = +10, while
+  cy "c" gives oy = -168, so the frame shifts 178 mm with identical w and h, and the
+  brief's four fields pass it. ox/oy come from bl, which is where setDisplayArea puts them.
+  DEVIATION (d) judged FAITHFUL term for term against main.zig:561-590, including all four
+  axis rejections and the space handling. "center" parses 'c' then hits 'e', which is not a
+  sign, and refuses, matching the daemon's null. Every divergence the reviewer probed
+  (strtod accepting nan/inf/0x/leading plus, files over 4096 B, absent display_area, a
+  string w_mm) lands on refuse or mismatch, never on a silent pass.
+  VERSION GATE: refuse correct, no-override correct. A 164-byte body carries no
+  self-describing shape, so a wrong grammar is undetectable downstream, and nothing fixes
+  an unknown protocol the way --force-display-area fixes a geometry, so an override would
+  only skip the message saying so.
+Task 12: IMPORTANT, fix dispatched, and it defeats the gate this task exists to build.
+  display.c:399-415 DROPS THE VERSION GATE ON RECONNECT: gz_client_reconnect ->
+  gz_client_connect -> gz_client_init memsets, clearing have_status and version_mismatch,
+  and the loop then sends get_display_area with no re-gate. Scenario: the daemon is
+  upgraded and restarted mid-gate, connection 1 passes at version 1, the request times out,
+  the reconnect lands on the version-2 daemon, and its body decodes under the OLD grammar
+  into a clean-looking WRONG rectangle.
+  WHY NOTHING CAUGHT IT: every test passes path == NULL, so that branch has ZERO coverage,
+  while production always passes a real path via gz_cmd_display -> gz_display_gate. The
+  tested path and the shipped path diverge exactly where the bug is.
+Task 12: minor, fix dispatched: display.h:97 advertises gz_display_gate as TASK 13'S ENTRY
+  POINT, but only gz_cmd_display prints the unmeasured-mounting NOTE, so the library entry
+  drops the single warning standing between a passing gate and a false sense of safety.
+Task 12: minor, fix dispatched: proto.c:288 takes w from the TOP edge while ox comes from
+  bl, so a skewed quad converts to a rectangle matching NEITHER edge and can pass.
+Task 12: FOR TASK 13, from the reviewer: re-run the gate after EVERY --force-display-area;
+  print the caveat yourself if calling gz_display_gate rather than gz_cmd_display; device
+  tilt is 0 today so MEASURING A REAL TILT IS THE FIRST THING THAT EXERCISES THE CORRECTED
+  FORMULAS, and if it disagrees check the sign convention first (negative = top edge toward
+  the user); cy "b - 10" means ox/oy are recomputed from w_mm/h_mm, so editing either
+  forces a re-force before the gate passes; and if the gate reconnects, treat the result as
+  UNGATED until the Important above is fixed.
