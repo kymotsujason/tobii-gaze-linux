@@ -42,6 +42,17 @@ if [ ! -f "$TEMPLATE" ]; then
   exit 1
 fi
 
+# The path is substituted rather than written as %h/Documents/tobii-eye-tracker
+# so the unit follows the checkout instead of assuming where it lives.
+render() { sed "s|@TOBIIFREED_BIN@|$BIN|g" "$TEMPLATE"; }
+
+# Before the binary check, so reading the unit on a fresh checkout does not
+# require building first.
+if [ "$MODE" = print ]; then
+  render
+  exit 0
+fi
+
 # ExecStart points into the build tree on purpose. scripts/build.sh resets the
 # submodule with `git clean -fd`, which cannot touch zig-out because it is
 # gitignored, so the path survives the patch workflow. A copy under
@@ -50,15 +61,6 @@ if [ ! -x "$BIN" ]; then
   echo "daemon binary not found or not executable: $BIN" >&2
   echo "build it first: scripts/build.sh" >&2
   exit 1
-fi
-
-# The path is substituted rather than written as %h/Documents/tobii-eye-tracker
-# so the unit follows the checkout instead of assuming where it lives.
-render() { sed "s|@TOBIIFREED_BIN@|$BIN|g" "$TEMPLATE"; }
-
-if [ "$MODE" = print ]; then
-  render
-  exit 0
 fi
 
 mkdir -p "$UNIT_DIR"

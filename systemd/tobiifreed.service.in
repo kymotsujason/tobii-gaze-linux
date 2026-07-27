@@ -17,14 +17,23 @@ StartLimitIntervalSec=0
 Type=exec
 ExecStart=@TOBIIFREED_BIN@
 
-# always, not on-failure: a boot that cannot open the tracker exits 0, so
-# on-failure never fires and the unit would sit inactive with the tracker
-# unclaimed. This cannot cut a healthy session short, because a daemon that
-# loses the device mid-flight reconnects in process and never exits, and
-# Restart= only fires on exit. The backoff mirrors the daemon's own reconnect
-# policy, which likewise settles at 30 s. Measured delays between reopen
-# attempts: 2.25, 3.5, 6.0, 10.25, 17.5, then 30 s. Worst case that is 30 s
-# from a tracker becoming available to gaze flowing again.
+# always, not on-failure, and this compensates for a known asymmetry in the
+# daemon rather than expressing a preference. A daemon that loses the device
+# mid-flight reconnects in process and never exits, so Restart= cannot fire and
+# cannot cut a healthy session short. A daemon that cannot open the device at
+# boot exits 0 (main.zig:721), so on-failure would never fire either and the
+# unit would sit inactive with the tracker unclaimed.
+#
+# What that costs, versus the daemon retrying its own boot: recovery takes up to
+# 30 s instead of the 2 s cap reconnect() uses for the first minute, and every
+# connected client is dropped once per cycle rather than riding it out. Measured
+# delays between attempts: 2.25, 3.5, 6.0, 10.25, 17.5, then 30 s.
+#
+# The real fix is not a boot retry. Server.init binds at main.zig:756, after the
+# USB open, so a daemon that merely retried its boot still would not accept
+# clients during an absence. That needs the socket bound before the device is
+# opened, and the reorder is deliberately scoped to Phase 2, when the OBS
+# plugin's requirements define what readiness has to mean.
 Restart=always
 RestartSec=2
 RestartSteps=5

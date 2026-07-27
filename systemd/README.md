@@ -24,20 +24,53 @@ put it out of reach of the desktop session.
 remove `zig-out` because it is gitignored. A copy under `~/.local/bin` was
 rejected: it would go stale after every rebuild, silently.
 
+## Session lifecycle
+
+`After=` and `PartOf=graphical-session.target` follow the pattern in
+`~/.config/systemd/user/alpha-overlay.service`. `WantedBy=graphical-session.target`
+does not, since that unit is `WantedBy=default.target`; the `[Install]` half
+follows `opentabletdriver.service`, `osu-ar-gamma.service` and
+`xmousepasteblock.service`, which are the three units already sitting in
+`graphical-session.target.wants`.
+
+`PartOf=` is belt-and-braces rather than the thing that stops the daemon at
+logout. `loginctl show-user jason -p Linger` reports `Linger=no`, so the whole
+user manager and everything under it goes away when the session ends, and the
+USB claim is released either way. `PartOf=` matters only if lingering is ever
+turned on, or if the Plasma session restarts without the manager restarting.
+
 ## Why the restart policy looks the way it does
 
-A daemon that loses the tracker while running never exits. It tears the USB
-session down and retries in process, so `Restart=` cannot fire and cannot cut a
-live session short.
+The daemon handles the two ways it can lose the tracker very differently, and
+the unit exists to paper over the gap. This is a recorded decision, not an
+oversight.
 
-A daemon that cannot open the tracker **at startup** exits with status 0. That
-is why `Restart=always` and not `on-failure`: `on-failure` would never fire, and
-the unit would sit `inactive` looking like a clean stop while the tracker went
-unclaimed. The cost is that a busy or absent tracker at startup produces a
-restart loop. `RestartSteps` spreads it out over 2.25, 3.5, 6.0, 10.25, 17.5 and
-then 30 s, matching the daemon's own reconnect backoff, so the steady state is
-one attempt and four journal lines per 30 s. Recovery after the tracker becomes
-available takes up to 30 s.
+A daemon that loses the tracker **while running** never exits. It tears the USB
+session down and retries in process with a 2 s cap for the first minute and 30 s
+after, so `Restart=` cannot fire and cannot cut a live session short.
+
+A daemon that cannot open the tracker **at startup** exits with status 0
+(`main.zig:721`). That is why `Restart=always` and not `on-failure`: `on-failure`
+would never fire, and the unit would sit `inactive` looking like a clean stop
+while the tracker went unclaimed. `RestartSteps` spreads the retries over 2.25,
+3.5, 6.0, 10.25, 17.5 and then 30 s, so the steady state is one attempt and four
+journal lines per 30 s.
+
+Two things that costs, both measured, both accepted:
+
+- Recovery takes **up to 30 s** after the tracker becomes available, against the
+  2 s the in-process path would manage in the first minute.
+- **Every connected client is dropped on each cycle**, because the process
+  really does exit and the socket really does go away. The in-process path keeps
+  them attached and just reports `device_present=0`.
+
+Fixing the exit alone would not buy back the second one. `Server.init` binds the
+socket at `main.zig:756`, after the USB open, so a daemon that retried its own
+boot still would not accept a client while the tracker was absent. Getting the
+full benefit needs the socket bound **before** the device is opened, which is a
+larger reorder than the exit code. That reorder is scoped to **Phase 2**, where
+the OBS plugin's actual requirements can define what readiness has to mean,
+rather than being guessed at now.
 
 `StartLimitIntervalSec=0` is for the operator, not the restart loop. The backoff
 above already stays under the default limiter, but a fifth `systemctl --user
@@ -61,6 +94,15 @@ hand-started daemon.
 The socket appears 59 to 71 ms after `systemctl --user start` returns. The unit
 is `Type=exec`, which reports execve failures but not readiness, so a script
 that starts the unit and connects immediately has to retry.
+
+**`Type=exec` is right today and will not stay right.** It is only adequate
+because nothing orders itself after this unit. The first unit that declares
+`After=tobiifreed.service`, or the first `ExecStartPost` added here, makes
+`Type=notify` mandatory, and that means adding an `sd_notify("READY=1")` to the
+daemon after `Server.init`. There is no way to fake it from the unit file:
+`Type=notify` with `NotifyAccess=all` plus an `ExecStartPost` that sends
+`systemd-notify --ready` deadlocks, since `ExecStartPost` does not run until the
+ready notification has already arrived.
 
 Idle cost is four journal lines a minute, about 350 KB of message text a day.
 The daemon logs at `.log_level = .debug` with no way to turn it down, but the
