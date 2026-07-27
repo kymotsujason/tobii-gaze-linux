@@ -330,3 +330,335 @@ unsigned gz_rect_diff(struct gz_rect got, struct gz_rect want,
     if (!(fabs(got.tilt_deg - want.tilt_deg) <= tol_deg)) d |= GZ_DA_DIFF_TILT;
     return d;
 }
+
+/* ---------------- host-side gaze correction ---------------- */
+
+void gz_eye_state_init(struct gz_eye_state *e) {
+    e->lr_mm[0] = e->lr_mm[1] = e->lr_mm[2] = 0.0;
+    e->have_lr = 0;
+}
+
+int gz_sample_eye_mid(struct gz_eye_state *e, const struct gz_gaze_sample *s,
+                      double out[3]) {
+    int have_l = gz_eye_valid(s->validity_L);
+    int have_r = gz_eye_valid(s->validity_R);
+
+    /* Into a local first, so a refusal cannot leave the caller with one
+     * coordinate from this frame and two from the last one. */
+    double v[3];
+
+    if (have_l && have_r) {
+        for (int i = 0; i < 3; i++) {
+            e->lr_mm[i] = s->eye_origin_R_mm[i] - s->eye_origin_L_mm[i];
+            v[i] = (s->eye_origin_L_mm[i] + s->eye_origin_R_mm[i]) * 0.5;
+        }
+        e->have_lr = 1;
+    } else if (!e->have_lr) {
+        /* Nothing to reconstruct from yet. Refusing costs one frame at 33.2 Hz;
+         * guessing an IPD would cost a lateral error for the whole session. */
+        return 0;
+    } else if (have_l) {
+        for (int i = 0; i < 3; i++) v[i] = s->eye_origin_L_mm[i] + e->lr_mm[i] * 0.5;
+    } else if (have_r) {
+        for (int i = 0; i < 3; i++) v[i] = s->eye_origin_R_mm[i] - e->lr_mm[i] * 0.5;
+    } else {
+        return 0;                       /* neither eye: no usable gaze either */
+    }
+
+    memcpy(out, v, sizeof v);
+    return 1;
+}
+
+void gz_eye_proj(struct gz_rect area, const double eye_mm[3], double out[2]) {
+    out[0] = (eye_mm[0] - area.ox_mm) / area.w_mm;
+    out[1] = (area.oy_mm + area.h_mm - eye_mm[1]) / area.h_mm;
+}
+
+int gz_correction_check(const struct gz_correction *c) {
+    /* !(x) rather than (!x) throughout, so a NaN parameter fails every test
+     * instead of passing the ones phrased as a negation. */
+    if (!(c->gx >= GZ_CORR_G_MIN) || !(c->gx <= GZ_CORR_G_MAX)) return 0;
+    if (!(c->gy >= GZ_CORR_G_MIN) || !(c->gy <= GZ_CORR_G_MAX)) return 0;
+    if (!(fabs(c->gx / c->gy - 1.0) < GZ_CORR_ISO_TOL)) return 0;
+    if (!(fabs(c->bx) < 1.0) || !(fabs(c->by) < 1.0)) return 0;
+    if (!(c->area.w_mm > 0.0) || !(c->area.h_mm > 0.0)) return 0;
+    return 1;
+}
+
+/* The spec writes this as E + (r - E - b)/g. Multiplied out it is
+ * (r + E*(g-1) - b)/g, which is algebraically the same and better in two ways:
+ * it is exact at the identity g = 1, b = 0, where the first form subtracts E
+ * and adds it back and need not land on r; and it avoids cancelling r against E
+ * when the eye happens to project near the gaze point. Only a reported
+ * coordinate of exactly -0.0 fails to round-trip, coming back as +0.0.
+ *
+ * One spelling, called by both the live path and the offline scoring in
+ * calibrate.c, so the two cannot drift apart. */
+void gz_correct_point(const struct gz_correction *c, const double eye_proj[2],
+                      const double reported[2], double out[2]) {
+    double v[2];
+    v[0] = (reported[0] + eye_proj[0] * (c->gx - 1.0) - c->bx) / c->gx;
+    v[1] = (reported[1] + eye_proj[1] * (c->gy - 1.0) - c->by) / c->gy;
+    memcpy(out, v, sizeof v);
+}
+
+int gz_gaze_correct(const struct gz_correction *c, struct gz_eye_state *e,
+                    const struct gz_gaze_sample *s, double out[2]) {
+    /* Both refusals before gz_sample_eye_mid, which writes to e: a sample that
+     * cannot be corrected should not silently arm the reconstruction either. */
+    if (!c->valid) return 0;
+    if (!(c->gx != 0.0) || !(c->gy != 0.0)) return 0;
+
+    double eye[3];
+    if (!gz_sample_eye_mid(e, s, eye)) return 0;
+
+    double ep[2];
+    gz_eye_proj(c->area, eye, ep);
+    gz_correct_point(c, ep, s->gaze_point_2d_norm, out);
+    return 1;
+}
+
+/* ---------------- locale-independent number text ----------------
+ *
+ * See the note in proto.h. Nine decimals is far past anything these parameters
+ * carry (a gain's ninth decimal is 3e-6 px) and it keeps every value this file
+ * holds inside int64 fixed point, so no exponent form is ever produced. */
+#define GZ_NUM_DECIMALS 9
+#define GZ_NUM_SCALE    1000000000LL
+#define GZ_NUM_MAX      1000000000.0
+
+static size_t fmt_num(char *buf, size_t cap, double v) {
+    /* Spelled as a positive test so NaN, which loses every comparison, is
+     * refused here rather than printed as some platform's idea of "nan". */
+    if (!(v > -GZ_NUM_MAX && v < GZ_NUM_MAX)) return 0;
+
+    int neg = 0;
+    if (v < 0) { neg = 1; v = -v; }
+
+    int64_t units = (int64_t)(v * (double)GZ_NUM_SCALE + 0.5);
+    int64_t ip = units / GZ_NUM_SCALE;
+    int64_t fp = units % GZ_NUM_SCALE;
+
+    char frac[GZ_NUM_DECIMALS];
+    for (int i = GZ_NUM_DECIMALS - 1; i >= 0; i--) {
+        frac[i] = (char)('0' + (int)(fp % 10));
+        fp /= 10;
+    }
+    int nfrac = GZ_NUM_DECIMALS;
+    while (nfrac > 0 && frac[nfrac - 1] == '0') nfrac--;
+
+    char intd[24];
+    int nint = 0;
+    if (ip == 0) intd[nint++] = '0';
+    while (ip > 0) { intd[nint++] = (char)('0' + (int)(ip % 10)); ip /= 10; }
+
+    size_t need = (size_t)neg + (size_t)nint + (nfrac > 0 ? 1u + (size_t)nfrac : 0u);
+    if (cap < need + 1) return 0;
+
+    size_t n = 0;
+    if (neg) buf[n++] = '-';
+    for (int i = nint - 1; i >= 0; i--) buf[n++] = intd[i];
+    if (nfrac > 0) {
+        buf[n++] = '.';
+        for (int i = 0; i < nfrac; i++) buf[n++] = frac[i];
+    }
+    buf[n] = '\0';
+    return n;
+}
+
+static int is_digit(char ch) { return ch >= '0' && ch <= '9'; }
+
+/* Binary exponentiation, non-negative exponents only. Every power of ten this
+ * file can produce is under 10^22, the largest one a double holds exactly, so
+ * the result is exact. */
+static double pow10i(int e) {
+    double r = 1.0, b = 10.0;
+    while (e > 0) {
+        if (e & 1) r *= b;
+        b *= b;
+        e >>= 1;
+    }
+    return r;
+}
+
+/* [+-]?digits[.digits][(e|E)[+-]?digits]. Returns 1 and advances *pp past the
+ * number, or 0 without touching *out. */
+static int parse_num(const char **pp, const char *end, double *out) {
+    const char *p = *pp;
+    int neg = 0;
+
+    if (p < end && (*p == '+' || *p == '-')) { neg = (*p == '-'); p++; }
+
+    double mant = 0.0;
+    int seen = 0, nfrac = 0;
+    while (p < end && is_digit(*p)) { mant = mant * 10.0 + (*p - '0'); p++; seen++; }
+    if (p < end && *p == '.') {
+        p++;
+        while (p < end && is_digit(*p)) {
+            mant = mant * 10.0 + (*p - '0');
+            p++; seen++; nfrac++;
+        }
+    }
+    if (seen == 0) return 0;
+
+    int ex = 0;
+    if (p < end && (*p == 'e' || *p == 'E')) {
+        const char *save = p;
+        p++;
+        int eneg = 0;
+        if (p < end && (*p == '+' || *p == '-')) { eneg = (*p == '-'); p++; }
+        int edig = 0;
+        while (p < end && is_digit(*p)) {
+            /* Clamped rather than overflowed: a exponent past this is going to
+             * be refused by the bounds check anyway, and signed overflow is
+             * undefined. */
+            if (ex < 100000) ex = ex * 10 + (*p - '0');
+            p++; edig++;
+        }
+        if (edig == 0) { p = save; ex = 0; }     /* a trailing 'e' is not an exponent */
+        else if (eneg) ex = -ex;
+    }
+
+    /* Divided rather than multiplied by a reciprocal. 12 * 0.1 is
+     * 1.2000000000000002 because 0.1 is not representable, while 12 / 10 is the
+     * correctly rounded 1.2, so this is what makes the text round trip. */
+    int e10 = ex - nfrac;
+    double v = e10 >= 0 ? mant * pow10i(e10) : mant / pow10i(-e10);
+    *out = neg ? -v : v;
+    *pp = p;
+    return 1;
+}
+
+size_t gz_correction_format(const struct gz_correction *c, char *buf, size_t cap) {
+    static const char *const keys[] = {
+        "version", "gx", "gy", "bx", "by",
+        "area_w_mm", "area_h_mm", "area_ox_mm", "area_oy_mm",
+        "area_z_mm", "area_tilt_deg"
+    };
+    const double vals[] = {
+        (double)GZ_CORRECTION_VERSION, c->gx, c->gy, c->bx, c->by,
+        c->area.w_mm, c->area.h_mm, c->area.ox_mm, c->area.oy_mm,
+        c->area.z_mm, c->area.tilt_deg
+    };
+    const size_t nkeys = sizeof vals / sizeof vals[0];
+
+    size_t n = 0;
+    for (size_t k = 0; k < nkeys; k++) {
+        for (const char *q = keys[k]; *q != '\0'; q++) {
+            if (n + 1 >= cap) return 0;
+            buf[n++] = *q;
+        }
+        if (n + 1 >= cap) return 0;
+        buf[n++] = '=';
+
+        size_t w = fmt_num(buf + n, cap - n, vals[k]);
+        if (w == 0) return 0;
+        n += w;
+
+        if (n + 1 >= cap) return 0;
+        buf[n++] = '\n';
+    }
+    buf[n] = '\0';
+    return n;
+}
+
+/* Every key this format models, in the order the bitmask below counts them. */
+enum {
+    CK_VERSION, CK_GX, CK_GY, CK_BX, CK_BY,
+    CK_W, CK_H, CK_OX, CK_OY, CK_Z, CK_TILT, CK_COUNT
+};
+
+static int key_is(const char *k, size_t klen, const char *want) {
+    size_t i = 0;
+    while (i < klen && want[i] != '\0') {
+        if (k[i] != want[i]) return 0;
+        i++;
+    }
+    return i == klen && want[i] == '\0';
+}
+
+static int key_index(const char *k, size_t klen) {
+    static const char *const names[CK_COUNT] = {
+        "version", "gx", "gy", "bx", "by",
+        "area_w_mm", "area_h_mm", "area_ox_mm", "area_oy_mm",
+        "area_z_mm", "area_tilt_deg"
+    };
+    for (int i = 0; i < CK_COUNT; i++) {
+        if (key_is(k, klen, names[i])) return i;
+    }
+    return -1;
+}
+
+static int is_space(char ch) { return ch == ' ' || ch == '\t' || ch == '\r'; }
+
+int gz_correction_parse(const char *buf, size_t len, struct gz_correction *out) {
+    if (buf == NULL) return GZ_CORR_PARSE_MALFORMED;
+
+    struct gz_correction c;
+    memset(&c, 0, sizeof c);
+    unsigned seen = 0;
+    double version = 0.0;
+
+    size_t i = 0;
+    while (i < len) {
+        size_t ls = i;
+        while (i < len && buf[i] != '\n') i++;
+        size_t le = i;
+        if (i < len) i++;                      /* step over the newline */
+
+        while (ls < le && is_space(buf[ls])) ls++;
+        while (le > ls && is_space(buf[le - 1])) le--;
+        if (ls == le || buf[ls] == '#') continue;
+
+        size_t eq = ls;
+        while (eq < le && buf[eq] != '=') eq++;
+        if (eq == le) return GZ_CORR_PARSE_MALFORMED;   /* a line that is not key=value */
+
+        size_t ke = eq;
+        while (ke > ls && is_space(buf[ke - 1])) ke--;
+        int idx = key_index(buf + ls, ke - ls);
+
+        size_t vs = eq + 1;
+        while (vs < le && is_space(buf[vs])) vs++;
+
+        if (idx < 0) continue;                 /* provenance the CLI appended */
+
+        const char *p = buf + vs;
+        double v = 0.0;
+        if (!parse_num(&p, buf + le, &v)) return GZ_CORR_PARSE_MALFORMED;
+        while (p < buf + le && is_space(*p)) p++;
+        if (p != buf + le) return GZ_CORR_PARSE_MALFORMED;  /* trailing junk */
+
+        /* A repeated key is a malformed file rather than a last-one-wins
+         * override: two gx lines mean nobody knows which gain is in force. */
+        if (seen & (1u << idx)) return GZ_CORR_PARSE_MALFORMED;
+        seen |= 1u << idx;
+
+        switch (idx) {
+        case CK_VERSION: version       = v; break;
+        case CK_GX:      c.gx          = v; break;
+        case CK_GY:      c.gy          = v; break;
+        case CK_BX:      c.bx          = v; break;
+        case CK_BY:      c.by          = v; break;
+        case CK_W:       c.area.w_mm   = v; break;
+        case CK_H:       c.area.h_mm   = v; break;
+        case CK_OX:      c.area.ox_mm  = v; break;
+        case CK_OY:      c.area.oy_mm  = v; break;
+        case CK_Z:       c.area.z_mm   = v; break;
+        case CK_TILT:    c.area.tilt_deg = v; break;
+        default: break;
+        }
+    }
+
+    if (seen != (1u << CK_COUNT) - 1u) return GZ_CORR_PARSE_MALFORMED;
+    if (version != (double)GZ_CORRECTION_VERSION) return GZ_CORR_PARSE_MALFORMED;
+
+    if (!gz_correction_check(&c)) {
+        c.valid = 0;
+        *out = c;
+        return GZ_CORR_PARSE_BOUNDS;
+    }
+    c.valid = 1;
+    *out = c;
+    return GZ_CORR_PARSE_OK;
+}

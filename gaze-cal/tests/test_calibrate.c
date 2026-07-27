@@ -1118,6 +1118,438 @@ static void test_apply_reports_a_rejection(void) {
     unlink(f.record);
 }
 
+/* ---------------- the host-side correction ---------------- */
+
+/* The measured display area, which is the only geometry a stored fit may
+ * claim. Field order is w, h, ox, oy, z, tilt. */
+static struct gz_rect corr_area(void) {
+    struct gz_rect r = { 590.42, 333.72, -295.21, 5.0, -7.5, 0.0 };
+    return r;
+}
+
+/* Builds a sweep from the forward model, so the fit has a known answer:
+ * reported = E_proj + g*(target - E_proj) + b. `drift` moves the head between
+ * points, which is what separates a per-point eye from a per-sweep average. */
+static void synth_sweep(struct gz_fit_input *in, double gx, double gy,
+                        double bx, double by, double drift_mm) {
+    struct gz_rect a = corr_area();
+    for (int i = 0; i < GZ_CAL_POINTS; i++) {
+        in[i].target[0] = GZ_CAL_PTS[i][0];
+        in[i].target[1] = GZ_CAL_PTS[i][1];
+        in[i].eye_mm[0] = 18.42 + drift_mm * i;
+        in[i].eye_mm[1] = 70.61;
+        in[i].eye_mm[2] = 598.0;
+
+        double ep[2];
+        gz_eye_proj(a, in[i].eye_mm, ep);
+        in[i].reported[0] = ep[0] + gx * (in[i].target[0] - ep[0]) + bx;
+        in[i].reported[1] = ep[1] + gy * (in[i].target[1] - ep[1]) + by;
+    }
+}
+
+static void test_fit_recovers_a_synthetic_gain(void) {
+    /* Spec 5.2. This is what catches a sign error on the y axis, which is the
+     * easiest thing to get wrong because normalised y grows downward while
+     * tracker y grows upward: a flipped E_proj still yields a plausible gain
+     * and a wrong offset. */
+    struct gz_fit_input in[GZ_CAL_POINTS];
+    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 0.0);
+
+    struct gz_correction c;
+    struct gz_fit_report rep;
+    assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_OK);
+    assert(c.valid == 1);
+    assert(fabs(c.gx - 1.1713) < 1e-9);
+    assert(fabs(c.gy - 1.1624) < 1e-9);
+    assert(fabs(c.bx - -0.0043) < 1e-9);
+    assert(fabs(c.by - -0.1487) < 1e-9);
+    assert(rep.n_used == GZ_CAL_POINTS && rep.n_rejected == 0);
+    assert(rep.median_resid_mm < 1e-9 && rep.worst_resid_mm < 1e-9);
+    assert(fabs(rep.eye_z_mm - 598.0) < 1e-9);
+    assert(gz_rect_diff(c.area, corr_area(), 1e-9, 1e-9) == 0);
+}
+
+static void test_fit_uses_each_points_own_eye(void) {
+    /* Spec do-not #3. The head drifts 5 mm per point here, 40 mm over the
+     * sweep. Fitting against each point's own eye recovers the gain exactly;
+     * a per-sweep average would not, and the error it leaves is the same
+     * 0.63 px per mm that separates the head-aware form from a plain affine. */
+    struct gz_fit_input in[GZ_CAL_POINTS];
+    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 5.0);
+
+    struct gz_correction c;
+    struct gz_fit_report rep;
+    assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_OK);
+    assert(fabs(c.gx - 1.1713) < 1e-9);
+    assert(fabs(c.bx - -0.0043) < 1e-9);
+    assert(rep.worst_resid_mm < 1e-9);
+
+    /* And the same data fitted against the mean eye instead does NOT recover
+     * it, which is what makes the previous assertion worth making. */
+    struct gz_fit_input avg[GZ_CAL_POINTS];
+    double mx = 0;
+    for (int i = 0; i < GZ_CAL_POINTS; i++) mx += in[i].eye_mm[0];
+    mx /= GZ_CAL_POINTS;
+    for (int i = 0; i < GZ_CAL_POINTS; i++) {
+        avg[i] = in[i];
+        avg[i].eye_mm[0] = mx;
+    }
+    struct gz_correction c2;
+    struct gz_fit_report rep2;
+    assert(gz_correction_fit(avg, GZ_CAL_POINTS, corr_area(), &c2, &rep2) == GZ_FIT_OK);
+    assert(rep2.worst_resid_mm > 0.5);
+}
+
+static void test_fit_drops_one_outlier_and_refits(void) {
+    struct gz_fit_input in[GZ_CAL_POINTS];
+    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 0.0);
+    /* One point where the eye was somewhere else entirely. */
+    in[4].reported[0] += 0.15;
+
+    struct gz_correction c;
+    struct gz_fit_report rep;
+    assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_OK);
+    assert(rep.n_rejected == 1 && rep.rejected[4] == 1);
+    assert(rep.n_used == GZ_CAL_POINTS - 1);
+    /* The refit lands back on the truth, which it cannot do if the outlier is
+     * still carrying weight. */
+    assert(fabs(c.gx - 1.1713) < 1e-9);
+    assert(fabs(c.gy - 1.1624) < 1e-9);
+    /* The rejected point still has a residual recorded, so a human can see how
+     * far out it was rather than being told a number vanished. */
+    assert(rep.resid_mm[4] > 10.0);
+}
+
+static void test_a_near_perfect_sweep_rejects_nothing(void) {
+    /* The zero-median guard. Real fixation noise is nowhere near this small,
+     * but a sweep whose residuals are all a few nanometres has a median of
+     * essentially zero, and 3x essentially zero rejects every point that is not
+     * bit-identical to the fit. Without the guard this sweep loses points, or
+     * loses more than one and is refused outright. */
+    struct gz_fit_input in[GZ_CAL_POINTS];
+    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 0.0);
+    /* One point off by a nanometre of normalised coordinate. That leaves it
+     * eight times the median residual, which the 3x rule would reject, while
+     * the median itself is 56 picometres. */
+    in[4].reported[0] += 1e-9;
+
+    struct gz_correction c;
+    struct gz_fit_report rep;
+    assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_OK);
+    assert(rep.n_rejected == 0);
+    assert(rep.n_used == GZ_CAL_POINTS);
+    assert(rep.median_resid_mm > 0.0 && rep.median_resid_mm < 1e-6);
+    assert(rep.worst_resid_mm > 3.0 * rep.median_resid_mm);
+    assert(fabs(c.gx - 1.1713) < 1e-6);
+}
+
+static void test_fit_refuses_two_outliers(void) {
+    /* Two is not an outlier, it is a sweep where the eye was elsewhere.
+     * Refitting around it would encode that rather than the gain.
+     *
+     * Both are displaced on the same axis at the same target x, so the slope
+     * is untouched and only the intercept moves. That is the shape where the
+     * 3x-median rule sees both of them. */
+    struct gz_fit_input in[GZ_CAL_POINTS];
+    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 0.0);
+    in[1].reported[0] += 0.20;
+    in[7].reported[0] += 0.20;
+
+    struct gz_correction c;
+    struct gz_fit_report rep;
+    assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_ERR_OUTLIER);
+    assert(c.valid == 0);
+    assert(rep.n_rejected == 2);
+    assert(rep.rejected[1] == 1 && rep.rejected[7] == 1);
+}
+
+static void test_a_second_outlier_on_the_other_axis_still_refuses(void) {
+    /* Worth pinning because it does NOT come back as an outlier. The rule the
+     * spec gives scores one residual per point over both axes and rejects once,
+     * so a y-displacement that the y regression partly absorbs can stay under
+     * 3x the median while dragging gy down with it. Here gy lands near 1.095.
+     *
+     * The ISOTROPY invariant is what catches it: 1.1713 against 1.0951 is 7.0
+     * percent apart, past the 5 percent the six recorded sweeps never came
+     * close to. Nothing is stored either way, but a reviewer should know the
+     * outlier rule alone is not the guard. With nine points and a single
+     * rejection round it is a coarse filter, and the measured envelope in
+     * gz_correction_check is the load-bearing one. */
+    struct gz_fit_input in[GZ_CAL_POINTS];
+    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 0.0);
+    in[2].reported[0] += 0.15;
+    in[6].reported[1] -= 0.15;
+
+    struct gz_correction c;
+    struct gz_fit_report rep;
+    int rc = gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep);
+    assert(rc == GZ_FIT_ERR_BOUNDS);
+    assert(c.valid == 0);
+    assert(c.gy >= GZ_CORR_G_MIN && c.gy <= GZ_CORR_G_MAX);   /* in range, but */
+    assert(fabs(c.gx / c.gy - 1.0) > GZ_CORR_ISO_TOL);         /* not isotropic */
+    assert(fabs(c.gy - 1.0951) < 1e-3);
+}
+
+static void test_fit_refuses_a_gain_outside_the_measured_envelope(void) {
+    struct gz_fit_input in[GZ_CAL_POINTS];
+    struct gz_correction c;
+    struct gz_fit_report rep;
+
+    synth_sweep(in, 1.60, 1.60, 0.0, 0.0, 0.0);
+    assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_ERR_BOUNDS);
+    assert(c.valid == 0);
+    /* The numbers are still there, so the CLI can name what it refused. */
+    assert(fabs(c.gx - 1.60) < 1e-9);
+
+    synth_sweep(in, 1.00, 1.00, 0.0, 0.0, 0.0);
+    assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_ERR_BOUNDS);
+
+    /* Anisotropic past 5 percent: measured isotropy is 0.9991 to 1.0148. */
+    synth_sweep(in, 1.25, 1.10, 0.0, 0.0, 0.0);
+    assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_ERR_BOUNDS);
+
+    /* A mirrored axis reads as a negative gain and must not be stored. */
+    synth_sweep(in, 1.17, -1.17, 0.0, 0.0, 0.0);
+    assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_ERR_BOUNDS);
+}
+
+static void test_fit_refuses_input_it_cannot_fit(void) {
+    struct gz_fit_input in[GZ_CAL_POINTS];
+    struct gz_correction c;
+    struct gz_fit_report rep;
+    synth_sweep(in, 1.1713, 1.1624, 0.0, 0.0, 0.0);
+
+    assert(gz_correction_fit(in, 3, corr_area(), &c, &rep) == GZ_FIT_ERR_POINTS);
+    assert(gz_correction_fit(in, 0, corr_area(), &c, &rep) == GZ_FIT_ERR_POINTS);
+    assert(gz_correction_fit(in, GZ_CAL_POINTS + 1, corr_area(), &c, &rep) == GZ_FIT_ERR_POINTS);
+
+    /* A stimulus that never moved gives no slope to measure. */
+    for (int i = 0; i < GZ_CAL_POINTS; i++) {
+        in[i].target[0] = 0.5;
+        in[i].reported[0] = 0.5;
+    }
+    assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_ERR_FLAT);
+
+    /* A zero-width area would divide by zero in the projection. */
+    struct gz_rect flat = corr_area();
+    flat.w_mm = 0;
+    synth_sweep(in, 1.1713, 1.1624, 0.0, 0.0, 0.0);
+    assert(gz_correction_fit(in, GZ_CAL_POINTS, flat, &c, &rep) == GZ_FIT_ERR_FLAT);
+}
+
+static void test_fit_residual_is_the_corrected_error(void) {
+    /* Not the regression residual: the two differ by the factor g, and the
+     * acceptance test in the spec measures the first. */
+    struct gz_fit_input in[GZ_CAL_POINTS];
+    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 0.0);
+
+    /* Displace the whole middle COLUMN in reported x by d. All three share a
+     * target x, so the slope is untouched and the intercept absorbs d/3,
+     * leaving a regression residual of exactly 2d/3 on them and d/3 on the
+     * other six. Nothing is far enough out to be rejected, so the arithmetic
+     * is exact and the only question left is which residual is reported. */
+    const double d = 0.03;
+    in[1].reported[0] += d;
+    in[4].reported[0] += d;
+    in[7].reported[0] += d;
+
+    struct gz_correction c;
+    struct gz_fit_report rep;
+    assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_OK);
+    assert(rep.n_rejected == 0);
+    assert(fabs(c.gx - 1.1713) < 1e-9);
+
+    double as_reported = (2.0 * d / 3.0) * 590.42;          /* 11.81 mm */
+    double as_corrected = as_reported / 1.1713;             /* 10.08 mm */
+    assert(fabs(rep.worst_resid_mm - as_corrected) < 1e-6);
+    assert(fabs(rep.worst_resid_mm - as_reported) > 1.0);
+    assert(fabs(rep.median_resid_mm - as_corrected / 2.0) < 1e-6);
+}
+
+static void test_collect_pairs_the_gaze_with_the_eye_midpoint(void) {
+    struct gz_client c;
+    int d = pair_client(&c);
+    struct gz_eye_state e;
+    gz_eye_state_init(&e);
+    struct gz_samples s;
+
+    unsigned char b[512];
+    size_t n = put_gaze(b, 300, 0.25, 0.75, GZ_VALIDITY_VALID, GZ_VALIDITY_VALID, 600);
+    assert(child_write(d, b, n));
+    assert(gz_collect_eyes(&c, 80, &s, &e) == 0);
+    assert(s.nfit == 1);
+    assert(fabs(s.fit_gaze_sum[0] - 0.25) < 1e-12);
+    assert(fabs(s.fit_eye_sum[2] - 600.0) < 1e-12);
+
+    /* An eyeless frame contributes nothing, even though present_mask claims
+     * the eye-origin fields are there and they read as a clean 0.0. */
+    n = put_gaze(b, 304, 0.30, 0.70, GZ_VALIDITY_NOT_DETECTED,
+                 GZ_VALIDITY_NOT_DETECTED, 0);
+    assert(child_write(d, b, n));
+    assert(gz_collect_eyes(&c, 80, &s, &e) == 0);
+    assert(s.nfit == 0);
+    assert(s.fit_eye_sum[2] == 0.0);
+
+    /* One eye is enough once the state has seen two, and the midpoint it
+     * reconstructs is not the lone eye's own position. */
+    n = put_gaze(b, 308, 0.35, 0.65, GZ_VALIDITY_VALID, GZ_VALIDITY_NOT_DETECTED, 600);
+    assert(child_write(d, b, n));
+    assert(gz_collect_eyes(&c, 80, &s, &e) == 0);
+    assert(s.nfit == 1);
+
+    close(d);
+    gz_client_close(&c);
+}
+
+static void test_collect_without_a_state_scopes_it_to_the_window(void) {
+    /* gz_collect passes NULL, so a window that opens on a one-eye frame has
+     * nothing to reconstruct from and records no pair. That is the documented
+     * behaviour, and it is why the sweep passes one state across all nine
+     * points instead. */
+    struct gz_client c;
+    int d = pair_client(&c);
+    struct gz_samples s;
+
+    unsigned char b[512];
+    size_t n = put_gaze(b, 400, 0.25, 0.75, GZ_VALIDITY_VALID,
+                        GZ_VALIDITY_NOT_DETECTED, 600);
+    assert(child_write(d, b, n));
+    assert(gz_collect(&c, 80, &s) == 0);
+    assert(s.n == 1);          /* the gaze point is still recorded */
+    assert(s.nfit == 0);       /* but it cannot be paired with an eye */
+
+    close(d);
+    gz_client_close(&c);
+}
+
+static void test_correction_file_round_trips(void) {
+    const char *p = tmp_path("corr");
+    unlink(p);
+
+    struct gz_correction c;
+    memset(&c, 0, sizeof c);
+    c.gx = 1.1713; c.gy = 1.1624; c.bx = -0.0043; c.by = -0.1487;
+    c.area = corr_area();
+    c.valid = 1;
+
+    struct gz_fit_report rep;
+    memset(&rep, 0, sizeof rep);
+    rep.n_used = 9;
+    rep.median_resid_mm = 8.5;
+    rep.worst_resid_mm = 17.25;
+
+    assert(gz_correction_save_to(p, &c, &rep, 598.0) == 0);
+
+    struct gz_correction back;
+    assert(gz_correction_load_from(p, corr_area(), &back) == 1);
+    assert(back.valid == 1);
+    assert(fabs(back.gx - c.gx) < 1e-9 && fabs(back.by - c.by) < 1e-9);
+    assert(gz_rect_diff(back.area, corr_area(), 1e-6, 1e-6) == 0);
+
+    /* The provenance is on disk and does not disturb the parse. */
+    FILE *f = fopen(p, "rb");
+    assert(f != NULL);
+    char text[2048];
+    size_t n = fread(text, 1, sizeof text - 1, f);
+    fclose(f);
+    text[n] = '\0';
+    assert(strstr(text, "fit_utc=") != NULL);
+    assert(strstr(text, "fit_points=9") != NULL);
+    assert(strstr(text, "fit_eye_z_mm=598.0") != NULL);
+    assert(strstr(text, "fit_median_resid_mm=8.500") != NULL);
+
+    char tmp[512];
+    snprintf(tmp, sizeof tmp, "%s.tmp", p);
+    assert(access(tmp, F_OK) != 0);
+    unlink(p);
+}
+
+static void test_correction_load_gates_on_the_display_area(void) {
+    /* Spec 4.2, and the reason the area is in the file at all. Calibration and
+     * this fit are both computed in the display-area frame, so a correction
+     * fitted against one geometry says nothing about another. */
+    const char *p = tmp_path("corrgate");
+    unlink(p);
+
+    struct gz_correction c;
+    memset(&c, 0, sizeof c);
+    c.gx = 1.1713; c.gy = 1.1624; c.bx = -0.0043; c.by = -0.1487;
+    c.area = corr_area();
+    c.valid = 1;
+    assert(gz_correction_save_to(p, &c, NULL, 598.0) == 0);
+
+    struct gz_correction back;
+    assert(gz_correction_load_from(p, corr_area(), &back) == 1);
+
+    /* Every field of the rectangle is gated, not just the size. Two areas of
+     * identical size in different places are different calibration frames. */
+    struct gz_rect other = corr_area();
+    other.w_mm += 5.0;
+    assert(gz_correction_load_from(p, other, &back) == -1);
+
+    other = corr_area();
+    other.ox_mm += 10.0;
+    assert(gz_correction_load_from(p, other, &back) == -1);
+
+    other = corr_area();
+    other.z_mm = 7.5;                 /* the sign the probe settled */
+    assert(gz_correction_load_from(p, other, &back) == -1);
+
+    other = corr_area();
+    other.tilt_deg = 5.0;
+    assert(gz_correction_load_from(p, other, &back) == -1);
+
+    /* Inside the tolerance the readback gate already uses. */
+    other = corr_area();
+    other.w_mm += 0.5;
+    assert(gz_correction_load_from(p, other, &back) == 1);
+
+    unlink(p);
+}
+
+static void test_correction_load_separates_absent_from_broken(void) {
+    const char *p = tmp_path("corrbad");
+    unlink(p);
+
+    struct gz_correction back;
+    /* No file is not an error: a first run has no correction and must still
+     * measure. */
+    assert(gz_correction_load_from(p, corr_area(), &back) == 0);
+
+    FILE *f = fopen(p, "wb");
+    assert(f != NULL);
+    fputs("this is not a correction\n", f);
+    fclose(f);
+    assert(gz_correction_load_from(p, corr_area(), &back) == -1);
+
+    /* Well formed, wrong numbers. Refused rather than applied: a wrong
+     * correction is worse than none because downstream it is
+     * indistinguishable from a calibration. */
+    f = fopen(p, "wb");
+    assert(f != NULL);
+    fputs("version=1\ngx=2.5\ngy=2.5\nbx=0\nby=0\n"
+          "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n"
+          "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n", f);
+    fclose(f);
+    assert(gz_correction_load_from(p, corr_area(), &back) == -1);
+
+    /* A file too large to be this format is refused rather than truncated.
+     * The padding here is COMMENTS after a complete and valid correction, so
+     * the first buffer's worth parses cleanly on its own: a loader that read
+     * only what fits and asked no further questions would accept this and
+     * never mention that it had not seen the whole file. */
+    f = fopen(p, "wb");
+    assert(f != NULL);
+    fputs("version=1\ngx=1.1713\ngy=1.1624\nbx=-0.0043\nby=-0.1487\n"
+          "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n"
+          "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n", f);
+    for (int i = 0; i < 4000; i++) fputs("# padding that a truncation cannot corrupt\n", f);
+    fclose(f);
+    assert(gz_correction_load_from(p, corr_area(), &back) == -1);
+
+    unlink(p);
+}
+
 int main(void) {
     test_points_land_on_the_right_pixels();
     test_points_are_clamped_and_nan_safe();
@@ -1149,6 +1581,21 @@ int main(void) {
     test_apply_refuses_impossible_lengths_without_sending();
     test_apply_sends_the_blob_verbatim();
     test_apply_reports_a_rejection();
+
+    test_fit_recovers_a_synthetic_gain();
+    test_fit_uses_each_points_own_eye();
+    test_fit_drops_one_outlier_and_refits();
+    test_a_near_perfect_sweep_rejects_nothing();
+    test_fit_refuses_two_outliers();
+    test_a_second_outlier_on_the_other_axis_still_refuses();
+    test_fit_refuses_a_gain_outside_the_measured_envelope();
+    test_fit_refuses_input_it_cannot_fit();
+    test_fit_residual_is_the_corrected_error();
+    test_collect_pairs_the_gaze_with_the_eye_midpoint();
+    test_collect_without_a_state_scopes_it_to_the_window();
+    test_correction_file_round_trips();
+    test_correction_load_gates_on_the_display_area();
+    test_correction_load_separates_absent_from_broken();
 
     printf("test_calibrate: all passed\n");
     return 0;

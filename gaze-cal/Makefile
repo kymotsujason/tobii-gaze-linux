@@ -6,6 +6,10 @@ CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -O2 -g
 # Grows as tasks 12+ land src/display.c, src/calibrate.c and src/record.c.
 # A fixed list breaks every build until then.
 SRC      = $(wildcard src/*.c)
+# Headers are a prerequisite too. Without them, editing proto.h leaves the CLI
+# "up to date" against the old declarations while the test binaries, which have
+# no prerequisites at all, rebuild and pass.
+HDR      = $(wildcard src/*.h)
 BUILD    = build
 # proto.c uses hypot and atan2 for the display-area conversion, so every target
 # that links it needs libm, not only the CLI.
@@ -17,7 +21,7 @@ XLIBS    = -lX11 -lXrandr
 
 .DEFAULT_GOAL := $(BUILD)/gaze-cal
 
-$(BUILD)/gaze-cal: $(SRC) | $(BUILD)
+$(BUILD)/gaze-cal: $(SRC) $(HDR) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS) $(XLIBS)
 $(BUILD):
 	mkdir -p $(BUILD)

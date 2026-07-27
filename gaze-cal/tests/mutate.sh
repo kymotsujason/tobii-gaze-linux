@@ -709,5 +709,172 @@ run_mutation "median taken from the unsorted array" calibrate.c \
     "    qsort(v, n, sizeof *v, cmp_double);" "    ;"
 
 echo
+echo "== gaze correction mutations (judged by test_proto) =="
+TEST_MAIN="tests/test_proto.c"
+TEST_SRCS="src/proto.c"
+
+# Normalised y grows DOWNWARD while tracker y grows upward. A flipped
+# projection still yields a plausible gain and a wrong offset, so nothing
+# downstream would notice.
+run_mutation "eye projection y not inverted" proto.c \
+    "    out[1] = (area.oy_mm + area.h_mm - eye_mm[1]) / area.h_mm;" \
+    "    out[1] = (eye_mm[1] - area.oy_mm) / area.h_mm;"
+
+run_mutation "eye projection ignores the area origin" proto.c \
+    "    out[0] = (eye_mm[0] - area.ox_mm) / area.w_mm;" \
+    "    out[0] = eye_mm[0] / area.w_mm;"
+
+# The whole point of the stage: dividing by g removes the gain, multiplying
+# doubles it.
+run_mutation "correction multiplies by the gain" proto.c \
+    "    v[0] = (reported[0] + eye_proj[0] * (c->gx - 1.0) - c->bx) / c->gx;" \
+    "    v[0] = (reported[0] + eye_proj[0] * (c->gx - 1.0) - c->bx) * c->gx;"
+
+run_mutation "correction drops the eye term" proto.c \
+    "    v[1] = (reported[1] + eye_proj[1] * (c->gy - 1.0) - c->by) / c->gy;" \
+    "    v[1] = (reported[1] - c->by) / c->gy;"
+
+run_mutation "correction ignores the offset" proto.c \
+    "    v[1] = (reported[1] + eye_proj[1] * (c->gy - 1.0) - c->by) / c->gy;" \
+    "    v[1] = (reported[1] + eye_proj[1] * (c->gy - 1.0)) / c->gy;"
+
+run_mutation "an unfitted correction is applied anyway" proto.c \
+    "    if (!c->valid) return 0;" "    ;"
+
+# 3.1: using the lone eye jumps E_proj by half an interpupillary distance.
+run_mutation "one-eye frame uses the lone eye" proto.c \
+    "        for (int i = 0; i < 3; i++) v[i] = s->eye_origin_L_mm[i] + e->lr_mm[i] * 0.5;" \
+    "        for (int i = 0; i < 3; i++) v[i] = s->eye_origin_L_mm[i];"
+
+run_mutation "one-eye frame reconstructs with the wrong sign" proto.c \
+    "        for (int i = 0; i < 3; i++) v[i] = s->eye_origin_R_mm[i] - e->lr_mm[i] * 0.5;" \
+    "        for (int i = 0; i < 3; i++) v[i] = s->eye_origin_R_mm[i] + e->lr_mm[i] * 0.5;"
+
+run_mutation "eye midpoint reconstructed before it has seen both eyes" proto.c \
+    "    } else if (!e->have_lr) {" "    } else if (0) {"
+
+# do-not #4. present_mask is 0x003fffff in EVERY frame, eyeless ones included,
+# where the eye-origin fields read as a clean 0.0.
+run_mutation "eye midpoint gates on present_mask" proto.c \
+    "    int have_l = gz_eye_valid(s->validity_L);" \
+    "    int have_l = (s->present_mask & GZ_BIT_EYE_ORIGIN_L) != 0;"
+
+run_mutation "validity inverted in the eye midpoint" proto.c \
+    "    int have_r = gz_eye_valid(s->validity_R);" \
+    "    int have_r = !gz_eye_valid(s->validity_R);"
+
+# 5.5 invariants. These are the load-bearing guard, not the outlier rule.
+run_mutation "gain envelope not checked" proto.c \
+    "    if (!(c->gx >= GZ_CORR_G_MIN) || !(c->gx <= GZ_CORR_G_MAX)) return 0;" "    ;"
+
+run_mutation "isotropy not checked" proto.c \
+    "    if (!(fabs(c->gx / c->gy - 1.0) < GZ_CORR_ISO_TOL)) return 0;" "    ;"
+
+# Documented survivor. The two spellings agree on every real number and differ
+# only on NaN, and a NaN gain is already refused one line below: the isotropy
+# test is !(fabs(gx/gy - 1) < TOL), and NaN loses that comparison too. The
+# spelling is kept because it should not depend on a neighbouring guard.
+run_mutation "gain check written so NaN passes" proto.c \
+    "    if (!(c->gy >= GZ_CORR_G_MIN) || !(c->gy <= GZ_CORR_G_MAX)) return 0;" \
+    "    if (c->gy < GZ_CORR_G_MIN || c->gy > GZ_CORR_G_MAX) return 0;" "documented"
+
+run_mutation "a whole-screen offset accepted" proto.c \
+    "    if (!(fabs(c->bx) < 1.0) || !(fabs(c->by) < 1.0)) return 0;" "    ;"
+
+# The text format. A decimal parsed through a reciprocal does not round trip:
+# 12 * 0.1 is 1.2000000000000002 while 12 / 10 is 1.2.
+run_mutation "decimals scaled by a reciprocal" proto.c \
+    "    double v = e10 >= 0 ? mant * pow10i(e10) : mant / pow10i(-e10);" \
+    "    double v = e10 >= 0 ? mant * pow10i(e10) : mant * (1.0 / pow10i(-e10));"
+
+run_mutation "trailing zeros not trimmed" proto.c \
+    "    while (nfrac > 0 && frac[nfrac - 1] == '0') nfrac--;" "    ;"
+
+run_mutation "parse accepts a missing key" proto.c \
+    "    if (seen != (1u << CK_COUNT) - 1u) return GZ_CORR_PARSE_MALFORMED;" "    ;"
+
+run_mutation "parse accepts a repeated key" proto.c \
+    "        if (seen & (1u << idx)) return GZ_CORR_PARSE_MALFORMED;" "        ;"
+
+run_mutation "parse ignores the format version" proto.c \
+    "    if (version != (double)GZ_CORRECTION_VERSION) return GZ_CORR_PARSE_MALFORMED;" "    ;"
+
+run_mutation "parse accepts junk after a number" proto.c \
+    "        if (p != buf + le) return GZ_CORR_PARSE_MALFORMED;  /* trailing junk */" \
+    "        ;"
+
+run_mutation "parse accepts a line that is not key=value" proto.c \
+    "        if (eq == le) return GZ_CORR_PARSE_MALFORMED;   /* a line that is not key=value */" \
+    "        if (eq == le) continue;"
+
+run_mutation "parse stores parameters outside the envelope" proto.c \
+    "    if (!gz_correction_check(&c)) {" "    if (0) {"
+
+run_mutation "format truncates instead of refusing" proto.c \
+    "        size_t w = fmt_num(buf + n, cap - n, vals[k]);
+        if (w == 0) return 0;" \
+    "        size_t w = fmt_num(buf + n, cap - n, vals[k]);
+        if (w == 0) { buf[n] = 0; return n; }"
+
+run_mutation "format writes a non-finite parameter" proto.c \
+    "    if (!(v > -GZ_NUM_MAX && v < GZ_NUM_MAX)) return 0;" \
+    "    if (v > GZ_NUM_MAX || v < -GZ_NUM_MAX) return 0;"
+
+echo
+echo "== correction fit and file mutations (judged by test_calibrate) =="
+TEST_MAIN="tests/test_calibrate.c"
+TEST_SRCS="src/calibrate.c src/display.c src/client.c src/proto.c"
+
+# do-not #3. The head drifts during a sweep; averaging folds that drift into
+# the parameters themselves.
+run_mutation "fit uses one eye position for the whole sweep" calibrate.c \
+    "        gz_eye_proj(area, in[i].eye_mm, ep);" \
+    "        gz_eye_proj(area, in[0].eye_mm, ep);"
+
+run_mutation "fit regresses the wrong way round" calibrate.c \
+    "        if (!ols(vx, ux, use, n, &gx, &bx)) return GZ_FIT_ERR_FLAT;" \
+    "        if (!ols(ux, vx, use, n, &gx, &bx)) return GZ_FIT_ERR_FLAT;"
+
+run_mutation "fit never rejects an outlier" calibrate.c \
+    "        if (drops == 0) break;" "        break;"
+
+run_mutation "fit refits around two outliers" calibrate.c \
+    "            return GZ_FIT_ERR_OUTLIER;" "            (void)0;"
+
+run_mutation "fit skips the envelope check" calibrate.c \
+    "    if (!gz_correction_check(out)) return GZ_FIT_ERR_BOUNDS;" "    ;"
+
+run_mutation "fit rejects a perfect sweep against a zero median" calibrate.c \
+    "        if (!(med > 1e-6)) break;" "        ;"
+
+run_mutation "fit accepts a degenerate point count" calibrate.c \
+    "    if (n < 4 || n > GZ_CAL_POINTS) return GZ_FIT_ERR_POINTS;" "    ;"
+
+# 4.2. A correction fitted against one geometry says nothing about another.
+run_mutation "correction loaded without the display-area gate" calibrate.c \
+    "    unsigned d = gz_rect_diff(c.area, want, GZ_DA_TOL_MM, GZ_DA_TOL_DEG);" \
+    "    unsigned d = 0; (void)want;"
+
+# Documented survivor. Removing this branch changes which message is printed,
+# not the outcome: a file that does not parse also cannot present a matching
+# display area, so the 4.2 gate below refuses it anyway and the caller still
+# gets -1. The diagnostic is the only thing lost.
+run_mutation "a malformed correction file loads as absent" calibrate.c \
+    "    if (r == GZ_CORR_PARSE_MALFORMED) {" "    if (0) {" "documented"
+
+run_mutation "an out-of-envelope correction file is applied" calibrate.c \
+    "    if (r == GZ_CORR_PARSE_BOUNDS) {" "    if (0) {"
+
+run_mutation "an overlong correction file is read truncated" calibrate.c \
+    "    if (overlong) {" "    if (0) {"
+
+# The fit pair must come from frames that carried both, or the two means
+# describe two different head positions.
+run_mutation "gaze paired with an eye it never had" calibrate.c \
+    "        if (have_gaze && gz_sample_eye_mid(e, g, mid)) {" \
+    "        if (have_gaze) {"
+
+
+echo
 echo "killed=$killed  documented_survivors=$documented  unexpected_survivors=$unexpected"
 [ "$unexpected" -eq 0 ]

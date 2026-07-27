@@ -193,6 +193,11 @@ static int run_probe(const struct gz_stim_ops *ops, const struct gz_screen *scr,
     return gz_cmd_probe(x->sock, x->cfg, ops, scr);
 }
 
+static int run_fit(const struct gz_stim_ops *ops, const struct gz_screen *scr, void *a) {
+    struct cal_args *x = a;
+    return gz_cmd_fit(x->sock, x->cfg, ops, scr);
+}
+
 static void usage(void) {
     fprintf(stderr,
             "usage: gaze-cal [--socket PATH] <command>\n"
@@ -208,8 +213,13 @@ static void usage(void) {
             "                             nine-point calibration, saves the blob to\n"
             "                             ~/.local/share/tobii-gaze/calibration.bin\n"
             "  apply-saved                apply that saved blob to the device\n"
+            "  fit [--output NAME] [--config PATH]\n"
+            "                             nine-point sweep, then fit the host-side\n"
+            "                             correction into\n"
+            "                             ~/.local/share/tobii-gaze/correction.conf\n"
             "  accuracy [--output NAME] [--config PATH] [--label TEXT]\n"
-            "                             measure gaze error at the nine points\n"
+            "                             measure gaze error at the nine points, and\n"
+            "                             report it corrected when a fit is on disk\n"
             "  preview [--sample N]       print N normalised gaze samples on stdout\n"
             "\n"
             "--output names an X RandR output; the default is the X primary.\n"
@@ -293,7 +303,7 @@ int main(int argc, char **argv) {
         return cmd_monitor(path, seconds);
     }
     if (strcmp(argv[i], "probe") == 0 || strcmp(argv[i], "calibrate") == 0 ||
-        strcmp(argv[i], "accuracy") == 0) {
+        strcmp(argv[i], "fit") == 0 || strcmp(argv[i], "accuracy") == 0) {
         struct cal_args x = { path, NULL, NULL };
         const char *output = NULL;
         int is_acc = (strcmp(argv[i], "accuracy") == 0);
@@ -303,6 +313,7 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "probe") == 0)     return with_stimulus(output, run_probe, &x);
         if (strcmp(argv[i], "calibrate") == 0) return with_stimulus(output, run_calibrate, &x);
+        if (strcmp(argv[i], "fit") == 0)       return with_stimulus(output, run_fit, &x);
         return with_stimulus(output, run_accuracy, &x);
     }
     if (strcmp(argv[i], "apply-saved") == 0) {

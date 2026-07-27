@@ -274,6 +274,128 @@ void gz_rect_to_corners(struct gz_rect r, double out[9]);
 unsigned gz_rect_diff(struct gz_rect got, struct gz_rect want,
                       double tol_mm, double tol_deg);
 
+/* ---------------- host-side gaze correction ----------------
+ *
+ * The device's display area, ray-plane intersection and normalisation are
+ * exact, and its 3D eye sensing is sound (reported IPD 65.56 mm sd 0.19 against
+ * a human-measured 65). What is wrong is the gaze DIRECTION: an isotropic,
+ * distance-invariant gain of about 1.17, plus an additive vertical offset. The
+ * onboard calibration's entire effect is a 4.6 mm eye-origin translation, which
+ * cannot express a gain, and no protocol command exists that would make one.
+ * So the device cannot be told to fix this and the correction is host-side.
+ *
+ * The model. The reported point is the true point scaled about the eye's own
+ * perpendicular projection onto the display plane, NOT about the screen centre:
+ *
+ *     reported  = E_proj + g * (true - E_proj) + b
+ *     corrected = E_proj + (reported - E_proj - b) / g
+ *
+ * Both hold identically in normalised display coordinates, so nothing here
+ * converts units at runtime beyond computing E_proj once per frame.
+ *
+ * Why the eye term rather than a plain affine in screen space: the two differ
+ * by ((g-1)/g) * (eye displacement), which on this panel is 0.63 px per mm of
+ * LATERAL or VERTICAL head movement. E_proj has no z term, so head movement in
+ * DEPTH costs nothing and the two forms agree exactly. See the task-13b report:
+ * this is the one part of the model the recorded sweeps cannot yet confirm.
+ *
+ * This lives in proto.c so Plan 2's OBS filter plugin shares one implementation
+ * with the CLI. It allocates nothing, performs no I/O, and is safe to call at
+ * 33.2 Hz from a render path. */
+
+#define GZ_CORRECTION_VERSION 1
+
+/* Sanity bounds a fit must satisfy before it is stored or used. Measured
+ * isotropy is 0.9991 to 1.0148 and the gain ran 1.1562 to 1.1828 across the six
+ * nine-point sweeps on record. A fit outside these has bad input or a bug, and
+ * a wrong correction is worse than none because it looks like a calibration. */
+#define GZ_CORR_G_MIN   1.05
+#define GZ_CORR_G_MAX   1.30
+#define GZ_CORR_ISO_TOL 0.05
+
+struct gz_correction {
+    double gx, gy;          /* gains, normalised units */
+    double bx, by;          /* offsets, normalised units */
+    struct gz_rect area;    /* the display area this fit is valid for */
+    int    valid;           /* 0 until loaded or fitted */
+};
+
+/* The eye midpoint needs one piece of session state, so it cannot live in the
+ * const gz_correction: with one eye tracked the midpoint is reconstructed by
+ * offsetting the valid eye by half the LAST KNOWN L-to-R vector. Using the
+ * single eye instead jumps E_proj by 32.78 mm and the corrected gaze by
+ * 21.7 px. Reconstruction is safe because the measured IPD is stable to
+ * sd 0.19 mm over 376 frames. */
+struct gz_eye_state {
+    double lr_mm[3];        /* last observed eye_origin_R - eye_origin_L */
+    int    have_lr;
+};
+
+void gz_eye_state_init(struct gz_eye_state *e);
+
+/* Writes the eye midpoint in tracker mm and returns 1, or returns 0 and leaves
+ * out untouched when no midpoint can be formed.
+ *
+ * Gates on VALIDITY, never on present_mask: present_mask is 0x003fffff in every
+ * frame this firmware sends, including frames with no eyes at all, where the
+ * eye-origin fields are plain 0.0. Gating on the mask silently feeds zeros into
+ * E_proj. Remember that validity == 0 means valid. */
+int gz_sample_eye_mid(struct gz_eye_state *e, const struct gz_gaze_sample *s,
+                      double out[3]);
+
+/* The eye's perpendicular projection onto the display plane, in normalised
+ * display coordinates. Normalised y grows DOWNWARD while tracker y grows
+ * upward, which is the sign this inverts and the easiest thing to get wrong.
+ *
+ * Assumes the plane is untilted, as the measured area is (2.15 +/- 1.95 deg,
+ * consistent with zero). A tilted area would want the eye projected along the
+ * plane normal instead, but the load-time gate pins the applied area to the
+ * fitted one, so any such error is identical at fit and at apply time and
+ * cancels rather than accumulating. */
+void gz_eye_proj(struct gz_rect area, const double eye_mm[3], double out[2]);
+
+/* The transform itself, on an eye projection and a reported point the caller
+ * already has. Exposed so the offline scoring in calibrate.c uses the same
+ * spelling as the live path rather than a second copy of the algebra.
+ *
+ * Divides by the gains without checking them, because every path that reaches
+ * it has already been through gz_correction_check or the fit's own bounds. */
+void gz_correct_point(const struct gz_correction *c, const double eye_proj[2],
+                      const double reported[2], double out[2]);
+
+/* Applies the correction. Returns 1 and writes out[2] on success, 0 if the
+ * sample cannot be corrected, in which case out is untouched. */
+int gz_gaze_correct(const struct gz_correction *c, struct gz_eye_state *e,
+                    const struct gz_gaze_sample *s, double out[2]);
+
+/* The invariants above. Returns 1 when the parameters are usable. */
+int gz_correction_check(const struct gz_correction *c);
+
+/* Pure text (de)serialisation of `key=value` lines. No file I/O: the caller
+ * owns the file. Unknown keys are ignored, so the CLI can append provenance
+ * that these two do not model.
+ *
+ * Both are deliberately locale-independent and do NOT use strtod or "%f".
+ * gaze-cal never calls setlocale, but the OBS plugin that reads this file runs
+ * inside a host that may well have, and in a comma-decimal locale strtod
+ * ("1.1713") stops at the dot and yields 1.0: a silently wrong gain that still
+ * passes every bounds check.
+ *
+ * BOUNDS is reported separately from MALFORMED because only the first has
+ * anything worth printing: the parsed numbers are written to out with valid
+ * left at 0, so the caller can name the gain it refused. */
+#define GZ_CORR_PARSE_OK        1
+#define GZ_CORR_PARSE_MALFORMED 0
+#define GZ_CORR_PARSE_BOUNDS    (-1)
+
+int    gz_correction_parse(const char *buf, size_t len, struct gz_correction *out);
+size_t gz_correction_format(const struct gz_correction *c, char *buf, size_t cap);
+
+/* The eleven keys gz_correction_format writes, at their worst case: a 13-byte
+ * name, '=', a 20-byte number and a newline is 35 bytes, so 385 plus the NUL.
+ * gz_correction_format refuses rather than truncates if this is ever too small. */
+#define GZ_CORRECTION_TEXT_MAX 512
+
 #ifdef __cplusplus
 }
 #endif

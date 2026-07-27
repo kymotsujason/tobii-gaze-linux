@@ -104,12 +104,30 @@ struct gz_samples {
     double z[GZ_SAMPLE_CAP];   /* eye origin z, tracker space, mm */
     unsigned nex, ney;
     double ex[GZ_SAMPLE_CAP], ey[GZ_SAMPLE_CAP];
+
+    /* Paired accumulator for the correction fit. Only frames that carried BOTH
+     * a gaze point and a reconstructible eye midpoint contribute, so the two
+     * means are over the same frames. Fitting a mean gaze against a mean eye
+     * taken over different frame sets would mix two head positions into one
+     * observation. Sums rather than arrays: the fit needs the means and the
+     * outlier rule works per point, not per frame. */
+    unsigned nfit;
+    double fit_gaze_sum[2];    /* gaze_point_2d_norm */
+    double fit_eye_sum[3];     /* eye midpoint, tracker mm */
 };
 
 /* Polls for ms, recording one sample per new frame_counter. Returns 0, or a
  * GZ_CLIENT_* negative. Draining matters even when the samples are thrown
  * away: the receive accumulator holds about 41 gaze frames, so 1.2 s of not
- * reading backs the socket up and eventually gets the client dropped. */
+ * reading backs the socket up and eventually gets the client dropped.
+ *
+ * `e` carries the eye-midpoint reconstruction across calls and may be NULL,
+ * which scopes it to this one window. A caller that wants the first frames of
+ * a window to be usable when only one eye is tracked must pass a state that has
+ * already seen both eyes. gz_collect is the NULL case, kept because most
+ * callers throw the samples away. */
+int gz_collect_eyes(struct gz_client *c, unsigned ms, struct gz_samples *s,
+                    struct gz_eye_state *e);
 int gz_collect(struct gz_client *c, unsigned ms, struct gz_samples *s);
 
 /* The share of inspected frames that had BOTH eyes, or 0 when too few frames
@@ -202,6 +220,74 @@ int gz_calibrate(struct gz_client *c, const struct gz_stim_ops *stim,
 int gz_apply_blob(struct gz_client *c, const char *sock_path,
                   const unsigned char *blob, size_t n);
 
+/* ---------------- the host-side correction ----------------
+ *
+ * The transform itself is in proto.c, because Plan 2's OBS plugin applies it
+ * too. Only the CLI ever FITS one, so the fit and the file live here.
+ *
+ * Kept out of calibration.bin deliberately. That blob is the device's own
+ * calibration; it has a different owner and a different lifetime, and merging
+ * the two is exactly the class of conflation that has already cost this project
+ * time. */
+#define GZ_CORR_RELNAME "correction.conf"
+
+/* One calibration point's worth of evidence: where the dot was, what the device
+ * reported, and where the eye was over the SAME frames. */
+struct gz_fit_input {
+    double target[2];        /* normalised display coordinates */
+    double reported[2];      /* mean gaze_point_2d_norm over the window */
+    double eye_mm[3];        /* mean eye midpoint, tracker mm, same frames */
+};
+
+#define GZ_FIT_OK          0
+#define GZ_FIT_ERR_POINTS  (-1)   /* fewer than four usable points */
+#define GZ_FIT_ERR_FLAT    (-2)   /* the targets do not span an axis */
+#define GZ_FIT_ERR_OUTLIER (-3)   /* more than one point past 3x the median */
+#define GZ_FIT_ERR_BOUNDS  (-4)   /* gain or isotropy outside GZ_CORR_* */
+
+struct gz_fit_report {
+    int    n_in, n_used;
+    int    rejected[GZ_CAL_POINTS];   /* 1 where a point was dropped as an outlier */
+    int    n_rejected;
+    /* Corrected-minus-target, in mm on the panel, for every input point,
+     * including rejected ones. This is the acceptance quantity, not the
+     * regression residual: they differ by the factor g. */
+    double resid_mm[GZ_CAL_POINTS];
+    double median_resid_mm, worst_resid_mm;
+    double eye_z_mm;                  /* mean over the used points, provenance */
+};
+
+/* Two univariate ordinary least squares of (reported - E_proj) on
+ * (target - E_proj), one per axis, using each point's OWN eye position. Never
+ * a per-sweep average eye: the head drifts during a sweep and averaging folds
+ * that drift into the parameters.
+ *
+ * Rejects a point whose residual exceeds 3x the median and refits once. More
+ * than one such point fails the whole sweep, because at that rate the sweep is
+ * not measuring a fixation. Pure and fixed-size, so it can move into proto.c if
+ * Plan 2 ever needs to fit. Returns GZ_FIT_OK or a GZ_FIT_ERR_*. */
+int gz_correction_fit(const struct gz_fit_input *in, int n, struct gz_rect area,
+                      struct gz_correction *out, struct gz_fit_report *rep);
+
+int gz_correction_path(char *buf, size_t cap);
+
+/* Writes through a temporary file and renames, like the blob. `rep` may be
+ * NULL; when present its numbers are appended as extra fit_* keys, which
+ * gz_correction_parse does not model and therefore ignores. Returns 0, or -1
+ * after printing why. */
+int gz_correction_save_to(const char *path, const struct gz_correction *c,
+                          const struct gz_fit_report *rep, double eye_z_mm);
+int gz_correction_save(const struct gz_correction *c,
+                       const struct gz_fit_report *rep, double eye_z_mm);
+
+/* Returns 1 when a usable correction was read, 0 when there is no file, and -1
+ * when a file exists but is unusable, having said so on stderr. `want` is the
+ * display area the device is currently holding: a correction fitted against a
+ * different geometry is meaningless and is refused rather than applied. */
+int gz_correction_load_from(const char *path, struct gz_rect want,
+                            struct gz_correction *out);
+int gz_correction_load(struct gz_rect want, struct gz_correction *out);
+
 /* ---------------- CLI entries ----------------
  *
  * The stimulus arrives already open, because opening it is the only part that
@@ -210,6 +296,8 @@ int gz_cmd_calibrate(const char *sock, const char *cfg,
                      const struct gz_stim_ops *stim, const struct gz_screen *scr);
 int gz_cmd_accuracy(const char *sock, const char *cfg, const char *label,
                     const struct gz_stim_ops *stim, const struct gz_screen *scr);
+int gz_cmd_fit(const char *sock, const char *cfg,
+               const struct gz_stim_ops *stim, const struct gz_screen *scr);
 int gz_cmd_probe(const char *sock, const char *cfg,
                  const struct gz_stim_ops *stim, const struct gz_screen *scr);
 int gz_cmd_apply_saved(const char *sock);
