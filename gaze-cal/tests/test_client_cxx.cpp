@@ -7,8 +7,6 @@
  * must resolve at the link.
  */
 #include <cassert>
-#include <cerrno>
-#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <sys/socket.h>
@@ -62,6 +60,12 @@ int main() {
     assert(gz_client_poll(&c, 10) == 0);
     assert(gz_client_request(&c, GZ_CMD_GET_DISPLAY_AREA, nullptr, 0, 20) == GZ_CLIENT_TIMEOUT);
     assert(gz_client_watchdog(&c, gz_now_ns()) == GZ_LINK_OK);
+    assert(gz_client_watchdog_for(&c, gz_now_ns(), 4000000000ULL) == GZ_LINK_OK);
+
+    /* The call the OBS plugin needs most: its recovery path is reconnect, not
+     * connect, and it must close the fd it already holds. */
+    assert(gz_client_reconnect(&c, "/tmp/gaze-cal-no-such-socket-cxx") == -1);
+    assert(c.fd == -1);
 
     gz_client_close(&c);
     close(sv[1]);

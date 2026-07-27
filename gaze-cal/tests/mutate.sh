@@ -298,6 +298,24 @@ run_mutation "every status re-arms the watchdog" client.c \
 run_mutation "watchdog window doubled" client.h \
     "#define GZ_WATCHDOG_NS 1000000000ULL" "#define GZ_WATCHDOG_NS 2000000000ULL"
 
+run_mutation "caller watchdog interval ignored" client.c \
+    "    if (now_ns - c->last_gaze_ns <= interval_ns) return GZ_LINK_OK;" \
+    "    if (now_ns - c->last_gaze_ns <= GZ_WATCHDOG_NS) return GZ_LINK_OK;"
+
+run_mutation "adopt leaks the fd it owns on a failed subscribe" client.c \
+    "        int e = errno;
+        gz_client_close(c);
+        gz_client_init(c);
+        errno = e;
+        return -1;
+    }
+    return 0;
+}" \
+    "        return -1;
+    }
+    return 0;
+}"
+
 run_mutation "watchdog wraps on a backwards clock" client.c \
     "    if (now_ns <= c->last_gaze_ns) return GZ_LINK_OK;" "    ;"
 

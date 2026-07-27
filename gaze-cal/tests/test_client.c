@@ -275,36 +275,50 @@ static void test_gap_detection_counts_missing_samples(void) {
 }
 
 static void test_reconnect_resets_gap_detection(void) {
-    /* frame_counter restarts when the daemon restarts. Carrying the old value
-     * across a reconnect reports about a billion dropped samples, which is the
-     * counter difference and not a measurement. */
-    int sv[2];
+    /* The counter does NOT restart with the daemon: measured across a 15 s
+     * kill and restart it ran 530932 to 531802, monotonic. The reset matters
+     * for the opposite reason, which is that the counter keeps advancing while
+     * the client is away, so carrying prev_counter charges the whole absence
+     * to dropped. The numbers below are that measured reconnect: an 870-count
+     * gap, which is 217 samples that would otherwise be reported as lost. */
+    int sv[2], sv2[2];
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
     struct gz_client c;
     assert(gz_client_adopt(&c, sv[0]) == 0);
 
     unsigned char buf[1024];
-    struct gz_gaze_sample a = mk_sample(1000000000u, 0, 0);
+    struct gz_gaze_sample a = mk_sample(530932, 0, 0);
     size_t n = put_gaze(buf, &a);
     assert(gz_client_feed(&c, buf, n) == 1);
     assert(c.dropped == 0);
     assert(c.have_prev_counter == 1);
 
-    int sv2[2];
-    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sv2) == 0);
+    gz_client_close(&c);
     close(sv[1]);
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sv2) == 0);
     assert(gz_client_adopt(&c, sv2[0]) == 0);
     assert(c.have_prev_counter == 0);
     assert(c.dropped == 0);
 
-    struct gz_gaze_sample b = mk_sample(4, 0, 0);
+    struct gz_gaze_sample b = mk_sample(531802, 0, 0);
     n = put_gaze(buf, &b);
     assert(gz_client_feed(&c, buf, n) == 1);
-    assert(c.dropped == 0);          /* not 249999999 */
+    assert(c.dropped == 0);          /* not 217 */
     assert(c.gaze_frames == 1);      /* per-connection, reset with the rest */
 
+    /* The same reset also covers a counter that did go backwards, which is not
+     * observed today but would report a quarter-billion drops if it happened. */
     gz_client_close(&c);
     close(sv2[1]);
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    assert(gz_client_adopt(&c, sv[0]) == 0);
+    struct gz_gaze_sample d = mk_sample(4, 0, 0);
+    n = put_gaze(buf, &d);
+    assert(gz_client_feed(&c, buf, n) == 1);
+    assert(c.dropped == 0);
+
+    gz_client_close(&c);
+    close(sv[1]);
 }
 
 /* ---------- subscribe on connect and on every reconnect ---------- */
@@ -469,6 +483,34 @@ static void test_request_ignores_a_reply_to_another_command(void) {
 
     gz_client_close(&c);
     close(sv[1]);
+}
+
+static void test_adopt_does_not_leak_the_fd_it_owns(void) {
+    /* The contract is "-1 with errno set and fd left at -1". A peer that is
+     * already gone makes the subscribe send take EPIPE, which is reachable
+     * rather than theoretical: server.zig:211-213 accepts a client past its
+     * limit and closes it at once, so connect() succeeds and this send fails.
+     * main.c retries every 250 ms, so a kept descriptor is one leak per
+     * attempt, inside OBS in Plan 2. */
+    int sv[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    close(sv[1]);
+
+    struct gz_client c;
+    int rc = gz_client_adopt(&c, sv[0]);
+    assert(rc == -1);
+    assert(c.fd == -1);
+    assert(fcntl(sv[0], F_GETFD) == -1 && errno == EBADF);   /* really closed */
+
+    /* And the client is left reusable, not half-open. */
+    int sw[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sw) == 0);
+    assert(gz_client_adopt(&c, sw[0]) == 0);
+    unsigned char sub[5];
+    read_exact(sw[1], sub, sizeof sub);
+    assert(sub[0] == GZ_CMD_SUBSCRIBE);
+    gz_client_close(&c);
+    close(sw[1]);
 }
 
 static void test_adopt_sets_nonblocking(void) {
@@ -681,6 +723,32 @@ static void test_a_returning_device_rearms_the_watchdog(void) {
     assert(gz_client_watchdog(&c, 19500000000ULL) == GZ_CLIENT_RECONNECT);
 }
 
+static void test_watchdog_interval_is_a_parameter(void) {
+    /* Every forwarded command parks the daemon's USB thread, so gaze stops for
+     * every subscribed client while some other client's batch runs. A client
+     * that shares a daemon with a command issuer needs a longer interval than
+     * the overlay does, and a reconnect must not quietly restore the default
+     * under it, which is why the interval is an argument and not state. */
+    struct gz_client c; gz_client_init(&c);
+    c.last_gaze_ns = 10000000000ULL;
+
+    /* 2.5 s of silence: over the 1 s default, under a 4 s caller interval. */
+    assert(gz_client_watchdog(&c, 12500000000ULL) == GZ_CLIENT_RECONNECT);
+    assert(gz_client_watchdog_for(&c, 12500000000ULL, 4000000000ULL) == GZ_LINK_OK);
+    assert(gz_client_watchdog_for(&c, 15000000000ULL, 4000000000ULL) == GZ_CLIENT_RECONNECT);
+
+    /* The default really is GZ_WATCHDOG_NS and not a second constant. */
+    assert(gz_client_watchdog(&c, 10000000000ULL + GZ_WATCHDOG_NS) == GZ_LINK_OK);
+    assert(gz_client_watchdog(&c, 10000000000ULL + GZ_WATCHDOG_NS + 1) == GZ_CLIENT_RECONNECT);
+
+    /* A caller interval does not override the stale branch: an absent device
+     * is still stale rather than a broken link. */
+    unsigned char buf[64];
+    size_t n = put_status(buf, 0, 0, GZ_PROTOCOL_VERSION);
+    assert(gz_client_feed_at(&c, buf, n, 10000000000ULL) == 0);
+    assert(gz_client_watchdog_for(&c, 20000000000ULL, 4000000000ULL) == GZ_LINK_STALE);
+}
+
 static void test_watchdog_tolerates_a_backwards_clock(void) {
     struct gz_client c; gz_client_init(&c);
     c.last_gaze_ns = 5000000000ULL;
@@ -859,6 +927,7 @@ int main(void) {
     test_request_returns_the_matching_response();
     test_request_ignores_a_reply_to_another_command();
     test_request_times_out_without_a_reply();
+    test_adopt_does_not_leak_the_fd_it_owns();
     test_adopt_sets_nonblocking();
 
     test_poll_reports_a_clean_eof_as_reconnect();
@@ -870,6 +939,7 @@ int main(void) {
     test_watchdog_is_armed_by_any_gaze_frame();
     test_watchdog_reports_stale_when_the_device_is_gone();
     test_a_returning_device_rearms_the_watchdog();
+    test_watchdog_interval_is_a_parameter();
     test_watchdog_tolerates_a_backwards_clock();
     test_watchdog_is_seeded_at_connect();
 

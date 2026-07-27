@@ -70,7 +70,21 @@ int gz_client_adopt(struct gz_client *c, int fd) {
     c->last_gaze_ns = gz_now_ns();
 
     int r = gz_client_flush(c);
-    if (r == GZ_CLIENT_RECONNECT) return -1;
+    if (r == GZ_CLIENT_RECONNECT) {
+        /* Closed, because the documented contract is "-1 with fd left at -1"
+         * and the caller's response to -1 is to retry, not to clean up. A
+         * connection whose subscribe never went out will never carry gaze, so
+         * there is nothing to salvage by keeping it. Reachable rather than
+         * theoretical: server.zig:211-213 accepts a client past its limit and
+         * closes it immediately, so connect() succeeds and this send takes
+         * EPIPE, and main.c retries every 250 ms. In Plan 2 that retry loop
+         * runs inside OBS, so one leaked descriptor per attempt is OBS's. */
+        int e = errno;
+        gz_client_close(c);
+        gz_client_init(c);
+        errno = e;
+        return -1;
+    }
     return 0;
 }
 
@@ -383,7 +397,16 @@ int gz_client_request(struct gz_client *c, uint8_t cmd, const void *payload, siz
 
     for (;;) {
         uint64_t now = gz_now_ns();
-        if (now >= deadline) return GZ_CLIENT_TIMEOUT;
+        if (now >= deadline) {
+            /* A TIMEOUT MUST BE TREATED AS A RECONNECT, never as "send the
+             * next one". The daemon may still answer after this returns, and
+             * an err frame carries no cmd_type, so a late err is attributed to
+             * whatever command is in flight next. A late response is at least
+             * re-correlated by cmd_type and counted in resp_mismatch; errs
+             * have no equivalent, because the wire format gives them nothing
+             * to correlate on. Reconnecting is the only way back in step. */
+            return GZ_CLIENT_TIMEOUT;
+        }
         uint64_t left_ms = (deadline - now) / 1000000ULL;
         int slice = (int)(left_ms > 1000 ? 1000 : left_ms) + 1;
 
@@ -405,12 +428,12 @@ int gz_client_request(struct gz_client *c, uint8_t cmd, const void *payload, siz
     }
 }
 
-int gz_client_watchdog(const struct gz_client *c, uint64_t now_ns) {
+int gz_client_watchdog_for(const struct gz_client *c, uint64_t now_ns, uint64_t interval_ns) {
     if (c->link_broken) return GZ_CLIENT_RECONNECT;
     /* Unsigned subtraction would turn a clock that appears to move backwards
      * into an 18-quintillion-nanosecond gap and fire instantly. */
     if (now_ns <= c->last_gaze_ns) return GZ_LINK_OK;
-    if (now_ns - c->last_gaze_ns <= GZ_WATCHDOG_NS) return GZ_LINK_OK;
+    if (now_ns - c->last_gaze_ns <= interval_ns) return GZ_LINK_OK;
 
     /* Silence the daemon has already explained. Reconnecting to a healthy
      * daemon cannot bring back an unplugged tracker, and the reconnect loop it
@@ -419,4 +442,8 @@ int gz_client_watchdog(const struct gz_client *c, uint64_t now_ns) {
     if (c->have_status && !c->status.device_present) return GZ_LINK_STALE;
 
     return GZ_CLIENT_RECONNECT;
+}
+
+int gz_client_watchdog(const struct gz_client *c, uint64_t now_ns) {
+    return gz_client_watchdog_for(c, now_ns, GZ_WATCHDOG_NS);
 }

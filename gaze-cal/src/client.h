@@ -40,7 +40,22 @@ extern "C" {
 /* Gaze arrives at a measured 33.2 Hz, one sample every 30.1 ms, so a second of
  * silence is 33 consecutive misses and cannot be jitter. The daemon gives up
  * on a stalled subscriber at about 10 s, so reacting at 1 s means the client
- * notices a wedge well before the daemon drops it. */
+ * notices a wedge well before the daemon drops it.
+ *
+ * COUPLED TO THE DAEMON'S USB PAUSE, and this is the constant's real
+ * falsifier. Every forwarded command parks the daemon's USB thread
+ * (main.zig:328), which stops gaze production for EVERY subscribed client, not
+ * only the one that sent the command. A command or batch that parks it for
+ * longer than this interval therefore fires an unrelated client's watchdog,
+ * and reconnecting cannot help, because nothing is wrong with that client's
+ * link. The daemon's own eof-hold budgets 3.6 s of exactly this. At a measured
+ * 30 ms per command inside a batch, 33 back-to-back commands reach 1 s.
+ *
+ * So 1 s is right for a daemon with one command-issuing client, which is what
+ * exists today. The concrete counter-case is Task 13 calibrating while a
+ * Plan 2 overlay is subscribed. A client that shares a daemon with a command
+ * issuer should pass its own interval to gz_client_watchdog_for rather than
+ * raise this default for everyone. */
 #define GZ_WATCHDOG_NS 1000000000ULL
 
 /* The daemon answers a command in about 30 ms, because each one parks the USB
@@ -98,8 +113,15 @@ struct gz_client {
     int have_error;
     uint32_t err_code;
 
-    /* Per-connection. frame_counter restarts with the daemon, so carrying
-     * these across a reconnect reports a fabricated billion-sample drop. */
+    /* Per-connection, reset on every connect. NOT because the counter
+     * restarts: measured across a full daemon kill of 15 s and a restart it
+     * ran 530932 to 531802, monotonic, and nothing observed resets it, not a
+     * daemon restart and not a USB re-enumeration (500952 to 500969 across an
+     * 11 s outage). The reset is load-bearing for the opposite reason. The
+     * counter keeps advancing while the client is away, so carrying
+     * prev_counter across a reconnect charges the entire absence to dropped:
+     * a measured reconnect gap of 870 counts is 217 samples that would have
+     * been reported as lost. Never compare dropped across a reconnect. */
     uint32_t prev_counter;
     int have_prev_counter;
     uint64_t dropped;
@@ -171,13 +193,23 @@ int gz_client_send(struct gz_client *c, uint8_t cmd, const void *payload, size_t
 /* Sends, then polls until the daemon answers. Returns 0 with the reply in
  * c->resp / c->resp_len, GZ_CLIENT_REMOTE with c->err_code set, or one of
  * GZ_CLIENT_TIMEOUT, GZ_CLIENT_RECONNECT, GZ_CLIENT_FULL, -1. Gaze frames that
- * arrive while waiting are consumed normally, not dropped. */
+ * arrive while waiting are consumed normally, not dropped.
+ *
+ * One command at a time. On GZ_CLIENT_TIMEOUT, reconnect: do not send the next
+ * command on the same connection. The daemon may answer late, and an err frame
+ * carries no cmd_type, so a late err lands on whichever command follows. */
 int gz_client_request(struct gz_client *c, uint8_t cmd, const void *payload, size_t n,
                       int timeout_ms);
 
 /* GZ_LINK_OK, GZ_LINK_STALE when the daemon has told us the device is gone, or
  * GZ_CLIENT_RECONNECT when gaze stopped with no explanation. Pass an absolute
- * gz_now_ns(); the client holds the other side of the comparison. */
+ * gz_now_ns(); the client holds the other side of the comparison.
+ *
+ * The interval is a parameter rather than client state so that a reconnect,
+ * which reinitialises everything else, cannot silently restore the default
+ * under a caller that chose otherwise. gz_client_watchdog uses GZ_WATCHDOG_NS;
+ * read that constant's note before picking a different one. */
+int gz_client_watchdog_for(const struct gz_client *c, uint64_t now_ns, uint64_t interval_ns);
 int gz_client_watchdog(const struct gz_client *c, uint64_t now_ns);
 
 #ifdef __cplusplus
