@@ -102,6 +102,54 @@ static void test_encode_rejects_huge_payload(void) {
     assert(memcmp(buf, probe, sizeof buf) == 0);
 }
 
+static void test_encode_rejects_null_payload_with_nonzero_length(void) {
+    /* memcpy from NULL is undefined even for a length the buffer could hold.
+     * A caller that lost track of its blob pointer must get a refusal. */
+    unsigned char buf[64];
+    assert(gz_encode_cmd(buf, sizeof buf, GZ_CMD_CAL_APPLY, NULL, 8) == 0);
+    assert(gz_encode_cmd(buf, sizeof buf, GZ_CMD_CAL_APPLY, NULL, 1) == 0);
+    /* NULL with length 0 stays legal: that is how subscribe is built. */
+    assert(gz_encode_cmd(buf, sizeof buf, GZ_CMD_SUBSCRIBE, NULL, 0) == 5);
+}
+
+static void test_frame_ceiling_covers_every_real_frame(void) {
+    /* GZ_MAX_PAYLOAD is the daemon's true ceiling, not a round number, so the
+     * frames it can actually emit must be checked to still fit. */
+    assert(GZ_MAX_RESPONSE_PAYLOAD == 8192);
+    assert(GZ_MAX_PAYLOAD == 8193);              /* 1 cmd_type + 8192 */
+    assert(GZ_MAX_FRAME == 8198);                /* 5 header + 8193 */
+    assert(GZ_MAX_FRAME == GZ_HEADER_SIZE + GZ_MAX_PAYLOAD);
+
+    assert(GZ_HEADER_SIZE + 392 <= GZ_MAX_FRAME);              /* gaze */
+    assert(GZ_HEADER_SIZE + GZ_STATUS_SIZE <= GZ_MAX_FRAME);   /* status */
+    assert(GZ_HEADER_SIZE + 4 <= GZ_MAX_FRAME);                /* err */
+    /* finish_calibration returns the blob: header + cmd_type + 4096. */
+    assert(GZ_HEADER_SIZE + 1 + GZ_CAL_BLOB_MAX <= GZ_MAX_FRAME);
+
+    /* A full-size calibration blob must still encode as a cal_apply command. */
+    static unsigned char blob[GZ_CAL_BLOB_MAX];
+    static unsigned char out[GZ_MAX_FRAME];
+    memset(blob, 0x5A, sizeof blob);
+    size_t n = gz_encode_cmd(out, sizeof out, GZ_CMD_CAL_APPLY, blob, sizeof blob);
+    assert(n == GZ_HEADER_SIZE + GZ_CAL_BLOB_MAX);
+    assert(memcmp(out + GZ_HEADER_SIZE, blob, sizeof blob) == 0);
+
+    /* A frame at exactly the ceiling parses; one byte past it is desync. */
+    static unsigned char big[GZ_MAX_FRAME];
+    memset(big, 0, sizeof big);
+    big[0] = GZ_SRV_RESPONSE;
+    big[1] = (unsigned char)(GZ_MAX_PAYLOAD & 0xFF);
+    big[2] = (unsigned char)((GZ_MAX_PAYLOAD >> 8) & 0xFF);
+    struct gz_frame f;
+    assert(gz_frame_parse(big, sizeof big, &f) == GZ_MAX_FRAME);
+    assert(f.body_len == GZ_MAX_PAYLOAD - 1);
+
+    uint32_t over = GZ_MAX_PAYLOAD + 1;
+    big[1] = (unsigned char)(over & 0xFF);
+    big[2] = (unsigned char)((over >> 8) & 0xFF);
+    assert(gz_frame_parse(big, sizeof big, &f) == GZ_ERR_DESYNC);
+}
+
 /* ---------- response: body starts at 6, not 5 ---------- */
 
 static void test_response_body_starts_at_offset_six(void) {
@@ -174,6 +222,44 @@ static void test_rejects_wrong_length_for_type(void) {
     unsigned char wire[5 + 4] = {0x01, 4,0,0,0};
     struct gz_frame f;
     assert(gz_frame_parse(wire, sizeof wire, &f) == GZ_ERR_DESYNC);
+}
+
+static void test_gaze_length_must_be_exact_not_minimum(void) {
+    /* The check is len == 392. A >= would accept an overlong gaze frame and
+     * then hand gz_frame_gaze a body it would copy only the first 392 bytes
+     * of, silently resynchronising onto the wrong offset. */
+    static const uint32_t plens[] = {393u, 400u, 784u, 391u, 0u};
+    for (size_t i = 0; i < sizeof plens / sizeof plens[0]; i++) {
+        unsigned char wire[5 + 800];
+        memset(wire, 0, sizeof wire);
+        wire[0] = GZ_SRV_GAZE;
+        wire[1] = (unsigned char)(plens[i]);
+        wire[2] = (unsigned char)(plens[i] >> 8);
+        struct gz_frame f;
+        assert(gz_frame_parse(wire, sizeof wire, &f) == GZ_ERR_DESYNC);
+    }
+    /* ... and 392 exactly is still accepted. */
+    unsigned char ok[5 + 392];
+    memset(ok, 0, sizeof ok);
+    ok[0] = GZ_SRV_GAZE;
+    ok[1] = (unsigned char)(392u & 0xFF);
+    ok[2] = (unsigned char)(392u >> 8);
+    struct gz_frame f;
+    assert(gz_frame_parse(ok, sizeof ok, &f) == 397);
+}
+
+static void test_four_byte_header_is_not_over_read(void) {
+    /* A 4-byte prefix is one short of a header. Reading the length field from
+     * it touches a fifth byte that does not exist. Heap-allocated to exactly 4
+     * so ASan traps the over-read rather than finding harmless stack padding. */
+    for (size_t len = 0; len < GZ_HEADER_SIZE; len++) {
+        unsigned char *heap = malloc(len ? len : 1);
+        assert(heap != NULL);
+        memset(heap, 0xFF, len ? len : 1);
+        struct gz_frame f;
+        assert(gz_frame_parse(heap, len, &f) == 0);
+        free(heap);
+    }
 }
 
 static void test_incomplete_frame_returns_zero(void) {
@@ -560,6 +646,43 @@ static void test_frame_counter_advances_by_four(void) {
     assert(gz_frames_dropped(100, 100) == 0);   /* duplicate, not a gap */
     assert(gz_frames_dropped(0xFFFFFFFCu, 0) == 0);   /* wraps cleanly */
     assert(gz_frames_dropped(0xFFFFFFF8u, 0) == 1);
+
+    /* A sub-step delta is a duplicate or a reordering, never a gap. Guarding
+     * on < 1 instead of < 4 makes these underflow to 0xFFFFFFFF, which a
+     * caller would report as four billion lost samples. */
+    assert(gz_frames_dropped(100, 101) == 0);
+    assert(gz_frames_dropped(100, 102) == 0);
+    assert(gz_frames_dropped(100, 103) == 0);
+    /* Deltas that are not multiples of the step truncate downwards rather
+     * than wrapping: 5..7 is still one step plus slop, so zero lost. */
+    assert(gz_frames_dropped(100, 105) == 0);
+    assert(gz_frames_dropped(100, 107) == 0);
+    assert(gz_frames_dropped(100, 109) == 1);
+}
+
+static void test_present_mask_bits(void) {
+    /* The 22 GAZE_BIT_* values from tobiifree_core.zig:1093-1114, in order.
+     * A duplicated or mistyped shift here silently reads the wrong field's
+     * presence, which no size or offset assert would catch. */
+    static const uint32_t bits[] = {
+        GZ_BIT_TIMESTAMP, GZ_BIT_FRAME_COUNTER, GZ_BIT_VALIDITY_L, GZ_BIT_VALIDITY_R,
+        GZ_BIT_PUPIL_L, GZ_BIT_PUPIL_R, GZ_BIT_GAZE_2D, GZ_BIT_GAZE_2D_L,
+        GZ_BIT_GAZE_2D_R, GZ_BIT_EYE_ORIGIN_L, GZ_BIT_EYE_ORIGIN_R,
+        GZ_BIT_GAZE_DIR_L, GZ_BIT_GAZE_DIR_R, GZ_BIT_GAZE_3D_L, GZ_BIT_GAZE_3D_R,
+        GZ_BIT_EYE_ORIGIN_L_DISP, GZ_BIT_EYE_ORIGIN_R_DISP,
+        GZ_BIT_TRACKBOX_L_DISP, GZ_BIT_TRACKBOX_R_DISP,
+        GZ_BIT_EYE_ORIGIN_RAW_L, GZ_BIT_EYE_ORIGIN_RAW_R, GZ_BIT_GAZE_2D_UNFILTERED
+    };
+    const size_t n = sizeof bits / sizeof bits[0];
+    assert(n == 22);
+
+    uint32_t seen = 0;
+    for (size_t i = 0; i < n; i++) {
+        assert(bits[i] == (1u << i));   /* right position, in the Zig's order */
+        assert((seen & bits[i]) == 0);  /* and not a duplicate */
+        seen |= bits[i];
+    }
+    assert(seen == 0x003FFFFFu);        /* exactly bits 0..21, nothing above */
 }
 
 /* ---------- display_area (0x03): known type, undefined shape ---------- */
@@ -604,6 +727,8 @@ int main(void) {
     test_encode_payload_is_little_endian();
     test_encode_rejects_short_buffer();
     test_encode_rejects_huge_payload();
+    test_encode_rejects_null_payload_with_nonzero_length();
+    test_frame_ceiling_covers_every_real_frame();
 
     test_response_body_starts_at_offset_six();
     test_response_offset_five_would_be_a_different_number();
@@ -613,6 +738,8 @@ int main(void) {
 
     test_rejects_absurd_length();
     test_rejects_wrong_length_for_type();
+    test_gaze_length_must_be_exact_not_minimum();
+    test_four_byte_header_is_not_over_read();
     test_incomplete_frame_returns_zero();
     test_rejects_unknown_type();
     test_length_near_ceiling_never_wraps();
@@ -644,6 +771,7 @@ int main(void) {
     test_status_accessor_rejects_short_body();
     test_err_accessor_rejects_short_body();
     test_frame_counter_advances_by_four();
+    test_present_mask_bits();
 
     test_display_area_frame_is_skippable();
     test_command_opcodes_match_the_zig_enum();

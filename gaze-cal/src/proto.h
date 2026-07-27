@@ -18,9 +18,34 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Plan 2's OBS filter plugin is C++, so this header must compile as both.
+ * _Static_assert is C-only and the declarations would otherwise mangle and
+ * fail to link against a C-built proto.o. */
+#ifdef __cplusplus
+#  define GZ_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+extern "C" {
+#else
+#  define GZ_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+
 #define GZ_HEADER_SIZE   5
-#define GZ_MAX_PAYLOAD   65536
 #define GZ_ERR_DESYNC    (-1)
+
+/* main.zig:265 MAX_RESPONSE_PAYLOAD. The daemon drops any device payload
+ * larger than this and sends an err instead, so no bigger frame is emitted. */
+#define GZ_MAX_RESPONSE_PAYLOAD 8192
+
+/* The response is the largest frame the daemon can produce: encodeResponse
+ * prepends a cmd_type byte, so payload_len tops out at 1 + 8192 = 8193.
+ * Bounding at the real ceiling rather than a round 64 KiB keeps desync
+ * detection tight: a garbage length above this is rejected on the spot instead
+ * of stalling the reader while it waits for bytes that never arrive. */
+#define GZ_MAX_PAYLOAD (1 + GZ_MAX_RESPONSE_PAYLOAD)
+
+/* Size a receive accumulator with this, never with GZ_MAX_PAYLOAD. A caller
+ * that allocates only GZ_MAX_PAYLOAD is 5 bytes short of the largest frame
+ * this parser will call well-formed, and would stall on it forever. */
+#define GZ_MAX_FRAME (GZ_HEADER_SIZE + GZ_MAX_PAYLOAD)
 
 /* daemon_protocol.zig: PROTOCOL_VERSION, bumped when a message changes shape. */
 #define GZ_PROTOCOL_VERSION 1
@@ -97,11 +122,11 @@ struct gz_gaze_sample {
  * plugin fails at its own compile rather than at ours. The offsets pin the
  * three places a reordering would land: the u32 block, the first f64 array,
  * and the tail. tests/test_proto.c pins all of them at runtime. */
-_Static_assert(sizeof(struct gz_gaze_sample) == 392,
-               "GazeSample must match the Zig extern struct exactly");
-_Static_assert(offsetof(struct gz_gaze_sample, timestamp_us) == 16, "layout drift");
-_Static_assert(offsetof(struct gz_gaze_sample, gaze_point_2d_norm) == 40, "layout drift");
-_Static_assert(offsetof(struct gz_gaze_sample, gaze_point_2d_unfiltered) == 376, "layout drift");
+GZ_STATIC_ASSERT(sizeof(struct gz_gaze_sample) == 392,
+                 "GazeSample must match the Zig extern struct exactly");
+GZ_STATIC_ASSERT(offsetof(struct gz_gaze_sample, timestamp_us) == 16, "layout drift");
+GZ_STATIC_ASSERT(offsetof(struct gz_gaze_sample, gaze_point_2d_norm) == 40, "layout drift");
+GZ_STATIC_ASSERT(offsetof(struct gz_gaze_sample, gaze_point_2d_unfiltered) == 376, "layout drift");
 
 struct gz_frame {
     uint8_t type;
@@ -140,5 +165,9 @@ int gz_sample_any_eye_valid(const struct gz_gaze_sample *s);
 
 /* Samples lost between two consecutive delivered frames. */
 uint32_t gz_frames_dropped(uint32_t prev_counter, uint32_t next_counter);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -16,8 +16,12 @@ trap 'rm -rf "$WORK"' EXIT
 CC=${CC:-cc}
 CFLAGS="-std=c11 -Wall -Wextra -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all"
 
-pass=0
-fail=0
+# Counted separately on purpose. Folding a documented survivor into the killed
+# total inflates the headline, which is exactly the loose claim the Task 10
+# review caught.
+killed=0
+documented=0
+unexpected=0
 
 fresh_copy() {
     rm -rf "$WORK/m"; mkdir -p "$WORK/m/src" "$WORK/m/tests"
@@ -42,34 +46,34 @@ PY
 judge() {
     name="$1"; allow_survive="$2"
     if ! out=$($CC $CFLAGS -o "$WORK/m/t" "$WORK/m/tests/test_proto.c" "$WORK/m/src/proto.c" 2>&1); then
-        echo "  CAUGHT   $name  (compile-time)"
-        pass=$((pass+1)); return
+        echo "  KILLED   $name  (compile-time)"
+        killed=$((killed+1)); return
     fi
     out=$("$WORK/m/t" 2>&1); rc=$?
     if [ $rc -ne 0 ]; then
         detail=$(echo "$out" | grep -m1 -E 'Assertion|runtime error|ERROR: ' | sed 's/^ *//' | cut -c1-100)
-        echo "  CAUGHT   $name  (rc=$rc) $detail"
-        pass=$((pass+1))
+        echo "  KILLED   $name  (rc=$rc) $detail"
+        killed=$((killed+1))
     elif [ -n "$allow_survive" ]; then
-        echo "  SURVIVED $name  (expected: unreachable given the other guard)"
-        pass=$((pass+1))
+        echo "  SURVIVED $name  (documented: unreachable given the other guard)"
+        documented=$((documented+1))
     else
         echo "  SURVIVED $name  <-- the suite does not detect this"
-        fail=$((fail+1))
+        unexpected=$((unexpected+1))
     fi
 }
 
 run_mutation() {
     fresh_copy
-    apply_edit "$2" "$3" "$4" || { fail=$((fail+1)); return; }
+    apply_edit "$2" "$3" "$4" || { unexpected=$((unexpected+1)); return; }
     judge "$1" "${5:-}"
 }
 
 # Two edits at once, for guards that only matter in combination.
 run_mutation2() {
     fresh_copy
-    apply_edit "$2" "$3" "$4" || { fail=$((fail+1)); return; }
-    apply_edit "$5" "$6" "$7" || { fail=$((fail+1)); return; }
+    apply_edit "$2" "$3" "$4" || { unexpected=$((unexpected+1)); return; }
+    apply_edit "$5" "$6" "$7" || { unexpected=$((unexpected+1)); return; }
     judge "$1" ""
 }
 
@@ -163,6 +167,22 @@ run_mutation "a [3]f64 field added" proto.h \
 run_mutation "subscribe opcode changed" proto.h \
     "enum { GZ_CMD_SUBSCRIBE = 0x01," "enum { GZ_CMD_SUBSCRIBE = 0x11,"
 
+# Found surviving by the Task 10 review, which probed past the original set.
+# Each is now killed by a test added in the fix round.
+
+run_mutation "header completeness check off by one" proto.c \
+    "    if (len < GZ_HEADER_SIZE) return 0;" "    if (len < 4) return 0;"
+
+run_mutation "gaze frame length accepted as a minimum" proto.c \
+    "case GZ_SRV_GAZE:         return len == sizeof(struct gz_gaze_sample);" \
+    "case GZ_SRV_GAZE:         return len >= sizeof(struct gz_gaze_sample);"
+
+run_mutation "encode NULL payload guard dropped" proto.c \
+    "    if (payload_len > 0 && payload == NULL) return 0;" "    ;"
+
+run_mutation "sub-step counter delta underflows" proto.c \
+    "if (delta < GZ_FRAME_COUNTER_STEP) return 0;" "if (delta < 1) return 0;"
+
 # Neither guard alone is provably load-bearing, so drop both and require the
 # near-ceiling test to still catch the resulting 32-bit wrap.
 run_mutation2 "plen bound AND widening both removed" \
@@ -172,5 +192,5 @@ run_mutation2 "plen bound AND widening both removed" \
             "size_t total = (size_t)(GZ_HEADER_SIZE + plen);"
 
 echo
-echo "caught=$pass survived_unexpectedly=$fail"
-[ "$fail" -eq 0 ]
+echo "killed=$killed  documented_survivors=$documented  unexpected_survivors=$unexpected"
+[ "$unexpected" -eq 0 ]
