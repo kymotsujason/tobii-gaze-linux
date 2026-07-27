@@ -588,6 +588,15 @@ git commit -m "fix: pause USB thread around all forwarded commands (P1)"
 - Consumes: Task 6's build
 - Produces: a daemon that never disconnects on `EAGAIN` and never leaves a partial frame on the wire
 
+**KNOWN DEPENDENCY THIS TASK CREATES, do not use `--ws` until it is closed.** This task
+fixes the unix socket path only. `ws_server.zig` still writes bare from the USB thread
+with no queue and no lock, and still calls `removeClient` on `error.WouldBlock`. After
+this task `onResponse` has two branches, one locked and queued, one neither, and both run
+on the USB thread, so `--ws` silently opts into a data race on the client array plus the
+exact EAGAIN disconnect this task exists to remove. `--ws` is off by default and this
+project's client uses the unix socket, so nothing in Phase 1 is blocked. Phase 2 must
+either fix `ws_server.zig` the same way or keep the flag unused.
+
 These are one patch, not two. `server.zig:162` is `_ = std.posix.write(client.fd, &msg) catch { self.removeClient(slot); };` on a non-blocking fd, so it both disconnects on `EAGAIN` and discards the short-write count. Fixing them separately is unsafe: a short write followed by `EAGAIN` leaves a frame prefix on the wire, which is exactly the desync that looping is meant to prevent.
 
 - [ ] **Step 1: Add a per-client output queue**

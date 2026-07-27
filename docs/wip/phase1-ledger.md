@@ -365,3 +365,64 @@ Task 6: UNEXPLAINED, by implementer and reviewer both: two clients pipelining 50
   read. One run completed 1000 of 1000 in 30.6 s, so it is a servicing delay, not a hang.
   Pause and routing logic is NOT implicated: forwarded equalled routed in every run,
   cumulative 1232 of 1232, zero table overflows. Task 8 should look.
+Task 7: review APPROVED (commit ed3374a, patches/0002-write-path.patch). Spec FULLY
+  COMPLIANT, one necessary deviation. Reviewer independently extracted the pin to a scratch
+  tree, applied all four patches in filename order, and confirmed every resulting file is
+  byte identical to the vendor tree, with no fuzz. Exactly one posix.write on a client fd
+  remains, inside flush.
+  SECOND PLAN-MANDATED CODE DEFECT, derived independently by the reviewer and by me. The
+  brief's enqueue tests capacity as (out_len - out_off + msg.len) but memcpys at out_len.
+  Those differ by exactly out_off. Reviewer's concrete reachable state: out.len 131072,
+  out_off 60000, out_len 130950, msg.len 170 gives 71120 <= 131072 so the test passes, the
+  reset branch does not fire because out_off != out_len, and the copy writes 48 bytes past
+  the end. Reachable via one stalled client that keeps sending commands: sendToClient
+  enqueues responses unconditionally so out_len climbs, and flush writing tens of KB does
+  short-write on AF_UNIX. In ReleaseSafe a remote client can panic the daemon; in
+  ReleaseFast it corrupts the next Client's fd or buf_len. Shipping the brief verbatim
+  would have been a CRITICAL. The shipped compaction version was proven overflow-free on
+  every path.
+Task 7: MY INSTRUCTION WAS WRONG, adjudicated in the implementer's favour. I told it to use
+  usb_polls -% 1 on the unacked path. Under an equality gate ANY baseline other than the
+  counter's true current value satisfies the exit condition immediately, so -% 1 deletes
+  the wait instead of lengthening it, and +% 1 fails identically. Reading the counter after
+  the store is the only correct fix, and it is what shipped.
+Task 7: IMPORTANT I1, MEASURED not argued, fix round dispatched. main.main reserves
+  0x6020b8 = 6,299,832 bytes = 6.008 MiB of an 8 MiB stack. sizeof(Server) is 0x3004a8 =
+  3.001 MiB, and the residual after subtracting TWO Server-sized objects is 5,992 bytes in
+  BOTH this build and the Task 6 baseline, which is only consistent with the frame holding
+  two. Confirmed in the disassembly: back-to-back memcpy calls with $0x3004a8 in %edx at
+  main.main+0x2cdf and +0x2cf3, the second targeting main.server. So the error-union return
+  materialises Server three times at startup. Headroom fell 6.0 MiB -> 1.99 MiB in one
+  patch, and MAX_CLIENTS = 32 would need ~12 MiB and fail to start with a stack-probe
+  SIGSEGV before logging anything.
+  FIX CHOSEN: give Server.init an out-parameter so the .bss global is built in place. This
+  needs no ruling from the user because the plan never specified how init returns, unlike
+  the 131072 buffer size, which is plan-mandated and stays.
+Task 7: IMPORTANT I2, recorded in the plan rather than fixed. ws_server.zig still writes
+  bare from the USB thread with no queue and no lock and still removeClients on
+  error.WouldBlock, so after this task onResponse has one locked branch and one unlocked
+  branch, both on the USB thread, and --ws silently opts into a data race plus the very
+  EAGAIN disconnect this task removes. Off by default and unused by this project's client,
+  so Phase 1 is not blocked. Plan's Task 7 section now carries the dependency.
+Task 7: reviewer named the single line preventing a real deadlock: server.zig:156 releases
+  the lock before forwardCommand. Without it the USB thread blocks in onResponse on a lock
+  the main thread holds while the main thread waits for that same thread to acknowledge a
+  pause. Because both pause loops are budgeted, reintroducing the bug would present as 2 s
+  per command and a refusal rather than a hard hang. A comment was requested at that site.
+Task 7: the brief's Step 4 stall test is a COIN FLIP, not a weak test. The disconnect
+  threshold is 66299 bytes, exactly 167 x 397 with remainder 0, so the socket buffer holds
+  precisely 167 frames, which at 33.2 Hz take 5.030 s. The brief's 5 s stall misses it by
+  about one frame, 30 ms. The pre-patch binary passes it. The 20 s run is the only
+  load-bearing evidence: old disconnects at 66299 bytes, patched keeps the client and
+  drains 66696 bytes, remainder 0 mod 397, 168 whole frames.
+Task 7: minor M4 (noted): 0002 was authored against a tree with 0003 applied, so its hunk
+  headers are wrong for the position it applies at and it lands at offsets -1 and -13.
+  Verified to resolve from the pin by exact context with no fuzz, and the context line
+  server.acceptClients() is unique in the file, so risk today is nil.
+Task 7: minor M5 (deferred): a wedged-but-live client now holds one of 16 slots forever and
+  drops every gaze sample, with no idle or backpressure timeout. Intended consequence of
+  the fix and the right trade, but a new resource-exhaustion shape nothing bounds.
+Task 7: minor M6 (CARRY TO TASK 9): response routing is still keyed on a raw fd. This task
+  narrows the damage from any fd to any live client, but a queue-full disconnect inside a
+  command is a NEW way for the fd to close mid-flight, so the recycled-fd window is
+  slightly wider than before.
