@@ -465,3 +465,70 @@ Task 7: note: driver/build.zig roots its tests at tobiifree_core.zig and
   compiles only via the daemon build.
 Task 7: complete (commits e93ae62..7e64687, review APPROVED, 1 Important fixed, 1 Important
   recorded as a plan dependency, 6 minors deferred)
+Task 8: review CHANGES REQUIRED, one CRITICAL. Commits 25932e6 (patches 0004, 0005) and
+  694f406 (test harness). Spec MET except Step 5, a physical replug, which needs a human.
+  TEN deviations, all justified, FOUR confirmed as real defects in the brief's own code:
+    D3 NULL dereference: LibusbTransport.deinit nulls usb_handle, and Zig does not assign
+      on the error path of `transport = init() catch continue`, so transport keeps the
+      nulled value. The brief never calls tracker.deinit(), so tracker.connected stays true
+      and poll() does not bail, reaching libusb_bulk_transfer(NULL, ...). Confirmed a
+      segfault. Verified fixed: 10 consecutive failed reopens, no crash.
+    D4 gaze callback never re-registered: Tracker.init sets .gaze_cb = null and still logs
+      "connected, streaming gaze", so a replug would report success and deliver ZERO
+      samples forever.
+    D5 response hook never re-installed: core.set_hooks treats null as leave-unchanged, so
+      queryDisplayArea's captureResponse replaces only the response hook and nobody
+      restores it. onResponse is the sole caller of takePending, so every routed response
+      would be dropped and pending would fill to 64.
+    D6 unconditional geometry replay would overwrite good device geometry from a possibly
+      stale config on every replug.
+  CRITICAL C1, the one nobody could have hit yet: reconnect() installs onResponse BEFORE
+    the geometry replay, and the replay calls setDisplayArea -> queryDisplayArea ->
+    set_hooks(captureResponse), which is never restored. So the replay branch UNDOES the
+    D5 fix. main() has these in the opposite order. Under --force-display-area the branch
+    condition is always true, so after any replug the daemon logs "USB reconnected", gaze
+    streams perfectly, and every command silently gets no reply until "pending table full".
+    Task 13's calibration is entirely add_calibration_point, so it would hang with no error
+    the client can see. One line moved. Fix round dispatched.
+Task 8: PATCH SPLIT PROVEN COMPLETE by content rather than line count. The reviewer git
+  archived the pin d303e47 to a scratch tree, applied all six patches in filename order,
+  and diff -r against vendor/tobiifree excluding .git, zig-out and caches: EXIT 0, BYTE
+  IDENTICAL. Independently, I confirmed the modified-file set and the covered-file set are
+  the same six files. tracker.zig genuinely needed no change.
+Task 8: CORRECTION to my own earlier note: the shipped gaze ring is 256 entries, about
+  7.7 s, not 64 and 2 s. And the ring overrun is GENUINELY fixed, not merely slowed. Three
+  separate changes doing different jobs: the per-command drain prevents the measured cause,
+  256 entries only widens the margin, and the detector changes the failure MODE so a lapped
+  reader jumps to w-(N-1) and counts the loss instead of serving stale slots as fresh. The
+  arithmetic checks out both ways: the old -252 backwards jumps are 63 x 4, exactly one lap
+  of 64, and the scratch build's 245 reported drops match the client's +984 forward jump,
+  which is 246 x 4.
+Task 8: LOG VOLUME defect found by the reviewer, fix dispatched. At the 2 s backoff cap the
+  daemon emits 1800 ERROR lines per hour, forever, while unplugged. That is the flood the
+  brief wanted avoided, merely slowed down.
+Task 8: FOUR MORE UNTESTED GAPS beyond the three the implementer named. (1) Bootloader-mode
+  re-enumeration: LibusbTransport.init only looks for 2104:0313, but CLAUDE.md records
+  2104:0102 as the bootloader PID, so a tracker returning in FBL mode retries forever at
+  the cap and says nothing actionable. (2) Unplug during a calibration command, which is
+  exactly what Task 13 does, and where a fatal lands in drainReads on the MAIN thread under
+  an acknowledged pause rather than in the USB thread's poll(). (3) Unplug with a WS client
+  attached, so failPending's ws.sendToClient path has never run. (4) Hours rather than
+  seconds; the longest measured absence is 15.5 s.
+Task 8: 4x4 mm ANOMALY, daemon code paths RULED OUT by the reviewer. decode_display_area
+  hands the payload to tlv.Reader.readPoint3d, which demands the exact prolog tag 0x031f41
+  then three Q42 reads, so garbage, truncation, a stale accumulator or a mis-routed
+  response would all fail with WrongTag and log "decode failed", not yield a clean
+  symmetric rectangle. The orelse fallback would have logged all-zero corners. So the bytes
+  were a WELL-FORMED DEVICE RESPONSE, and the anomaly is device-side. It first appeared
+  after a session containing eight reset_tobii runs. Instrumentation dispatched: hex-log
+  the raw payload, length and request id whenever decoded corners trip isReset().
+  Separately, a real latent hazard was found that does NOT explain this one but is being
+  closed anyway: captureResponse stores a POINTER into the core accumulator whose lifetime
+  ends at the next feed_usb_in, drainReads keeps feeding, and feed_usb_in compacts acc_buf.
+  It works today only because try_recv_fn's 1 ms timeout means the response is the last
+  feed before the next 30 ms gaze frame.
+Task 8: PHYSICAL TEST CHECKLIST produced for the user, 10 items, in section 8 of the
+  verdict file. Item 4 is load-bearing: whether a replug logs "preserved across reconnect"
+  or "replaying display area after reconnect" decides whether the ET5 keeps geometry across
+  a power cycle, and therefore whether the replay branch is dead code or the critical path.
+  C1 must be fixed BEFORE that test or item 7 fails for an unrelated reason.
