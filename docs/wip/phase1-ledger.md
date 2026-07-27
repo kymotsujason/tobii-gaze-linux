@@ -721,3 +721,34 @@ Task 9: complete (commits 7b090b7..54539ff, review APPROVED after one fix round,
 ALL DAEMON PATCH TASKS COMPLETE. patches/ holds eight patches, 0000 through 0005 plus 0007
   and 0008, and they reconstruct the vendor tree byte-identically from the pin d303e47.
   Tasks 10 onward build the C client.
+Task 10: implemented, commit c8e6cd8, gaze-cal/src/proto.{c,h} plus tests and Makefile.
+  DONE_WITH_CONCERNS. 41 tests on gcc 16.1.1 with -Wall -Wextra -Werror, again under ASan
+  and UBSan, again on clang 22.1.8 with -Wconversion -Wsign-conversion -Wshadow
+  -Wcast-align -Wpedantic. `make mutate` breaks the implementation 25 ways and the suite
+  catches all 25 with 0 unexpected survivors. Verified live against the real daemon and
+  tracker: 265 gaze frames read in 37-byte chunks, 2922 partial parses, 0 desyncs, every
+  frame_counter delta exactly +4, 33.11 Hz. nm shows memcpy as proto.o's ONLY undefined
+  symbol, so no allocation, no I/O, no CLI dependency.
+Task 10: FOURTH SET OF PLAN DEFECTS, three in one task.
+  (1) LOAD-BEARING FOR TASK 12: the brief said display_area frames are 9 doubles. THE
+      DAEMON NEVER EMITS TYPE 0x03 AT ALL. A get_display_area reply comes back as a
+      RESPONSE (0x02) with cmd_type 0x02 and a 164-byte RAW TTP body. Confirmed live, not
+      inferred. proto now treats 0x03 as a known type with no defined shape: bounded,
+      consumed, handed to the caller to ignore rather than treated as desync. Task 12 is
+      built entirely on reading the display area back, so it must know this.
+  (2) gz_encode_cmd as quoted had a LIVE integer overflow: `cap < 5 + payload_len` wraps
+      for payload_len near SIZE_MAX and admits a SIZE_MAX memcpy. Reproduced under ASan as
+      negative-size-param: (size=-1). Fixed by bounding against GZ_MAX_PAYLOAD before any
+      arithmetic.
+  (3) The brief's Makefile did not build: SRC listed five files that do not exist until
+      Task 11. Now $(wildcard src/*.c) with .DEFAULT_GOAL := test, since there is no main()
+      to link yet. TASK 11 SHOULD FLIP the default goal back to $(BUILD)/gaze-cal.
+Task 10: status uses len >= 3 rather than the brief's len == 3, following the brief's prose
+  over its code. == 3 would turn an appended status field into a desync a client cannot
+  distinguish from corruption, at exactly the moment PROTOCOL_VERSION exists to prevent it.
+Task 10: CARRY TO TASK 11: GZ_MAX_PAYLOAD is 65536 as specified though the daemon's real
+  ceilings are 8193 and 4097, so Task 11 needs a 64 KB read buffer to guarantee forward
+  progress.
+Task 10: CLAUDE.md corrected by controller on two counts the implementer flagged: the
+  1500x1000 placeholder is gone and the device holds the real 597x336, and the
+  display_area-frame myth is now recorded as a myth.
