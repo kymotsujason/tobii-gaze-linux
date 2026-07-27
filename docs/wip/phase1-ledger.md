@@ -788,3 +788,30 @@ Task 10: PLAN CORRECTED for Task 12, which was built on a false premise. Its bri
   Task 12 must port decode_display_area (tobiifree_core.zig:445: skip a 2-byte prolog, then
   three readPoint3d reads of Q42 fixed point) into C. That means a small TLV READER THE
   PLAN NEVER BUDGETED FOR. Plan text updated.
+Task 10: fix round 1/5 (4 addressed plus the recorded bit-table item; commits
+  81919e0..a955357). Re-review verdict ALL FIXES ADDRESSED, no new breakage.
+  Fix 1 proven at the RIGHT STAGE, which is why insisting on the link mattered: the
+  Makefile really mixes compilers (cc compiles proto.c to proto_c.o, g++ links), and
+  proto.c is never compiled as C++. Reverting extern "C" alone still COMPILES clean and
+  fails only at ld with 10 undefined mangled references. Reverting only the assert call
+  sites fails on g++ but NOT on clang++, which accepts _Static_assert as an extension, so
+  only one of the two compilers catches that half. Both halves necessary.
+  Fix 2 confirmed correct by enumeration AND by construction. main.zig:265 is
+  MAX_RESPONSE_PAYLOAD = 8192 and :267 drops anything larger; daemon_protocol.zig has
+  exactly four encoders (gaze 392, status 3, err 4, response 1 + payload); the two
+  encodeResponse sites cap at 8192 and at core.scratch_size() = 4096. So the max emitted
+  payload_len is exactly 8193 and the max frame 8198, matching the macros. The re-reviewer
+  then BUILT a finish_calibration reply (0x02, cmd_type 0x22, 4096-byte blob) and parsed it
+  under ASan/UBSan: 4102 bytes, body at offset 6, body_len 4096, all bytes intact. The cap
+  cannot reject legitimate daemon traffic.
+  Fix 3 hardened beyond the ask: a STALE apply_edit pattern now increments `unexpected`, so
+  a rotted mutant fails the run instead of quietly shrinking the denominator.
+  Bit-mask table pins VALUES not self-consistency: the test's 22-name array was diffed name
+  by name against tobiifree_core.zig:1093-1114, same names and same order, so
+  bits[i] == (1u << i) pins each constant to its Zig value.
+Task 10: complete (commits 3730578..a955357, review APPROVED, fix round clean)
+Task 10: FINAL CARRY TO TASK 11: GZ_MAX_PAYLOAD is now 8193 not 65536, so a wire length in
+  8194..65536 is GZ_ERR_DESYNC rather than "wait for more bytes"; size the accumulator with
+  GZ_MAX_FRAME (8198); `make check` runs test, test-asan, test-cxx and mutate;
+  .DEFAULT_GOAL is still `test` and must be flipped back to $(BUILD)/gaze-cal once main()
+  exists.
