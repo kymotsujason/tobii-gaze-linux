@@ -1555,3 +1555,28 @@ THE CONCLUSION THAT MATTERS, and it changes Phase 1's scope:
   A homography could go below 37 px later; do not start there.
 ONE MEASUREMENT STILL WANTED, and it is the only one that changes code: the human's TRUE IPD
   against the device's reported 65.56 mm (sd 0.19).
+IPD SETTLES THE SUB-CASE, 2026-07-27. Human's true IPD is about 65 mm; the device reports
+  65.56 (sd 0.19). That is 0.9 percent agreement.
+  WHY IT IS DECISIVE: IPD is a SCALE measurement in 3D. If the device believed the head were
+  9 percent further away than it is, it would over-report IPD by the same factor, roughly
+  71 mm, not 65.56. So the device's 3D EYE-POSITION SENSING IS SOUND, sub-case B1 (a biased
+  eye-distance estimate) is DEAD, and by elimination the whole 18 percent lives in the GAZE
+  DIRECTION model, the optical-to-visual axis mapping, which the device's calibration
+  provably cannot express.
+  COROLLARY: the tape's a = 400 was probably the mismeasured quantity rather than the
+  device's 436.6, which dissolves the 154 mm puzzle in b as a tape-anchor problem rather
+  than a geometry one.
+  MOUNTING CONFIRMED BY THE USER: the tracker is on the bottom bezel of the ALIENWARE, the
+  lowest and middle monitor. So the stacked-panel explanation (DP-2 at +4000+1440 with
+  DP-1-2 directly above at +4000+0) is ruled out.
+PHASE 1 NEEDS A TASK THE PLAN NEVER HAD: a host-side gaze correction stage. The device
+  cannot be told to fix this, since its calibration only translates the eye origin by a few
+  millimetres and no command exists to set a gain. Implementation spec requested from the
+  investigator rather than left to an implementer to guess, covering the functional form,
+  the parameters and how they are fitted, where it lives given proto.c is linked directly by
+  Plan 2's OBS plugin, how parameters persist alongside the existing calibration blob, the
+  acceptance test, and an explicit do-not list.
+  THIS MUST LAND BEFORE TASK 15. Task 15 records a five-minute gameplay trace and Task 16
+  fits the overlay's filter constants to it, so recording a trace through an 18 percent gain
+  would poison every downstream constant, and the error would look like sensor noise rather
+  than a systematic scale.
