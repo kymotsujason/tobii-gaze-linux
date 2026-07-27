@@ -1270,3 +1270,32 @@ Task 13: awaiting the human. Four steps relayed: probe (settles the z sign), acc
   --label uncalibrated (the before picture), calibrate, then the persistence script with a
   REAL cable pull. Step 1 gates step 3: the z sign must be settled before calibrating,
   because calibration is computed in the display-area frame.
+Z SIGN SETTLED BY MEASUREMENT, 2026-07-27, and it overruled this project's own recorded
+  convention. `gaze-cal probe` with the user seated read eye origin in tracker space as
+  x -12, y 47, z +549 mm over 93 frames with an eye origin (z spread 534 to 572).
+  So +z POINTS AT THE USER, which is Tobii's published UCS. The screen surface sits 7.5 mm
+  BEHIND the tracker's front face, therefore at z = -7.5.
+  THIS CONTRADICTS the only convention statement previously recorded here, from Task 12's
+  reviewer, which inferred from tl_z = bl_z + h*sin(t) that "negative tilt = top edge
+  toward the user" and therefore that +z pointed away. The measurement wins. The inference
+  was reasonable and wrong, which is exactly why leaving z at 0 rather than guessing the
+  sign was the right call.
+  APPLIED AND VERIFIED: config z_mm -7.5, forced, and the DEVICE reads back
+  TL=(-295.2,338.7,-7.5) TR=(295.2,338.7,-7.5) BL=(-295.2,5.0,-7.5). The display area is
+  now fully specified and every value in it is either measured or correct by construction.
+BOTH AXES CONFIRMED as the stimulus assumes: normalised y grows DOWNWARD (top dot -0.083,
+  bottom dot 0.817, difference +0.900) and normalised x grows RIGHTWARD (left -0.014,
+  right 0.969, difference +0.983). So the nine calibration points are in the frame the
+  device expects.
+SEATING DISTANCE MEASURED AT ~549 mm, NOT the 600 mm the spec assumes. This matters for
+  spec section 9's visual constants and for Task 16. At 590.42 mm across 2560 px the scale
+  is 4.336 px/mm, so one degree subtends 549 * tan(1 deg) = 9.58 mm = 41.5 px at the
+  measured distance, against 45.4 px at 600 mm. That is an 8 percent difference in
+  px-per-degree, and every overlay size expressed in degrees inherits it.
+  CAVEAT, do not over-read: this is one 20-second sample and the z spread was 534 to 572,
+  so the user moves. It is a better figure than the assumed 600 but it is not a constant.
+  Task 15's five-minute trace will give a far better distribution, and Task 16 should take
+  the distance from that rather than from this probe.
+NOTE: eye origin y was +47 mm, i.e. only 42 mm above the screen's bottom edge on a 333.7 mm
+  tall panel, so the user's eyes sit low relative to this monitor. Recorded for Phase 2's
+  viewing-angle assumptions, not actionable now.
