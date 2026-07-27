@@ -280,6 +280,17 @@ int gz_decode_display_area(const unsigned char *body, size_t len, double out[9])
  * taking z from tl, or flipping the atan2 arguments all agree at tilt 0 and
  * all disagree the moment the panel is tilted, which is exactly the case the
  * config's unmeasured tilt makes reachable. */
+/* The three constraints setDisplayArea's construction implies, and the only
+ * ones: tr.x is free because it carries the width, and bl.y and bl.z are free
+ * because they carry the origin. Same !(x <= tol) spelling as gz_rect_diff, so
+ * a NaN corner is not rectangular. */
+int gz_corners_are_rectangular(const double c[9], double tol_mm) {
+    if (!(fabs(c[0] - c[6]) <= tol_mm)) return 0;   /* tl.x vs bl.x */
+    if (!(fabs(c[4] - c[1]) <= tol_mm)) return 0;   /* tr.y vs tl.y */
+    if (!(fabs(c[5] - c[2]) <= tol_mm)) return 0;   /* tr.z vs tl.z */
+    return 1;
+}
+
 struct gz_rect gz_corners_to_rect(const double c[9]) {
     struct gz_rect r;
     double dy = c[1] - c[7];        /* tl.y - bl.y */

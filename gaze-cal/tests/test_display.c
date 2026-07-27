@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -302,6 +303,72 @@ static void test_config_accepts_a_valid_json_escape(void) {
     assert(gz_config_load_rect(p, &r) == 0);
     assert(r.w_mm == 597 && r.h_mm == 336);
     unlink(p);
+}
+
+/* ---------- stderr capture ----------
+ *
+ * Only for the messages that are load-bearing rather than informational. The
+ * unmeasured-mounting caveat is one: an OK from the gate is the last thing
+ * between a calibration and a wrong one, and a readback cannot tell an
+ * unmeasured 0 from a measured one, so the warning has to reach whoever sees
+ * the OK. Untested, it is decorative and drifts.
+ *
+ * The capture file is unlinked in cap_end rather than at creation, so an abort
+ * inside a captured region leaves the assertion text on disk instead of
+ * swallowing it. */
+static char cap_buf[16384];
+static char cap_path[128];
+static int cap_fd = -1, cap_saved = -1;
+
+static void cap_begin(void) {
+    fflush(stderr);
+    snprintf(cap_path, sizeof cap_path, "/tmp/gz_cap_%d.txt", (int)getpid());
+    cap_saved = dup(STDERR_FILENO);
+    assert(cap_saved >= 0);
+    cap_fd = open(cap_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    assert(cap_fd >= 0);
+    assert(dup2(cap_fd, STDERR_FILENO) >= 0);
+}
+
+static const char *cap_end(void) {
+    fflush(stderr);
+    assert(dup2(cap_saved, STDERR_FILENO) >= 0);
+    close(cap_saved);
+    assert(lseek(cap_fd, 0, SEEK_SET) == 0);
+    ssize_t r = read(cap_fd, cap_buf, sizeof cap_buf - 1);
+    if (r < 0) r = 0;
+    cap_buf[r] = '\0';
+    close(cap_fd);
+    unlink(cap_path);
+    return cap_buf;
+}
+
+/* One line of the caveat, chosen so the assertion does not straddle a wrap. */
+#define CAVEAT_MARK "z_mm, tilt, cx and cy are the daemon's"
+
+static void test_the_success_caveat_follows_the_verdict(void) {
+    /* display.h names gz_display_gate as Task 13's entry, so the caveat cannot
+     * live in the CLI wrapper: the library caller would lose it silently. It
+     * is printed by the function that produces the verdict, and every caller
+     * inherits it. */
+    double c[9];
+    gz_rect_to_corners(real_panel, c);
+    cap_begin();
+    int rc = gz_display_verify(c, real_panel, GZ_DA_TOL_MM, GZ_DA_TOL_DEG);
+    const char *out = cap_end();
+    assert(rc == 0);
+    assert(strstr(out, CAVEAT_MARK) != NULL);
+
+    /* Not on a refusal. There the operator has a concrete thing to do, and a
+     * caveat about parameters nobody measured only buries it. */
+    struct gz_rect placeholder = { 1500, 1000, -750, -500, 0, 0 };
+    gz_rect_to_corners(placeholder, c);
+    cap_begin();
+    rc = gz_display_verify(c, real_panel, GZ_DA_TOL_MM, GZ_DA_TOL_DEG);
+    out = cap_end();
+    assert(rc == -1);
+    assert(strstr(out, "REFUSING TO CALIBRATE") != NULL);
+    assert(strstr(out, CAVEAT_MARK) == NULL);
 }
 
 /* ---------- verify ---------- */
@@ -694,6 +761,276 @@ static void test_a_reply_to_another_command_is_not_the_answer(void) {
     assert(fake_stop(&f) == 1);
 }
 
+static void test_the_library_entry_prints_the_caveat(void) {
+    struct step s[1];
+    step_da(&s[0], real_panel);
+    struct fake f;
+    fake_start(&f, 1, 0, GZ_PROTOCOL_VERSION, s, 1, 0);
+
+    cap_begin();
+    int g = gz_display_gate(&f.c, NULL, real_panel, GZ_DA_TOL_MM, GZ_DA_TOL_DEG);
+    const char *out = cap_end();
+    assert(g == GZ_GATE_OK);
+    assert(strstr(out, CAVEAT_MARK) != NULL);
+    assert(fake_stop(&f) == 1);
+}
+
+/* ---------- the reconnect path, over a real listening socket ----------
+ *
+ * Everything above passes path == NULL, so the reconnect branch has no coverage
+ * there while production always reaches it with a real path through
+ * gz_cmd_display. That divergence is what hid the missing re-gate, so these
+ * tests take the shipped path: a listening AF_UNIX socket, gz_client_connect,
+ * and a child that serves one scripted session per connection.
+ */
+
+#define SRV_MAX_CONN 3
+
+struct conn_script {
+    uint8_t present, cal, ver;
+    struct step steps[FAKE_MAX_STEPS];
+    size_t nsteps;
+};
+
+struct server {
+    char path[96];
+    pid_t pid;
+    int report;                 /* read end: one byte of command count per conn */
+};
+
+/* Serves nconn sessions in order, then exits. Reports each session's
+ * post-subscribe command count, so a test can prove the client refused before
+ * sending rather than after. */
+static void server_start(struct server *s, const struct conn_script *sc, size_t nconn) {
+    snprintf(s->path, sizeof s->path, "/tmp/gz_gate_%d.sock", (int)getpid());
+    unlink(s->path);
+
+    int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    assert(lfd >= 0);
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    assert(strlen(s->path) < sizeof a.sun_path);
+    memcpy(a.sun_path, s->path, strlen(s->path));
+    assert(bind(lfd, (struct sockaddr *)&a, sizeof a) == 0);
+    assert(listen(lfd, (int)nconn + 1) == 0);
+
+    int pipefd[2];
+    assert(pipe(pipefd) == 0);
+
+    s->pid = fork();
+    assert(s->pid >= 0);
+    if (s->pid == 0) {
+        close(pipefd[0]);
+        for (size_t i = 0; i < nconn; i++) {
+            int d = accept(lfd, NULL, NULL);
+            if (d < 0) break;
+            unsigned char cmds = 0;
+            unsigned char hdr[5];
+
+            if (child_read(d, hdr, 5) && hdr[0] == GZ_CMD_SUBSCRIBE) {
+                unsigned char st[16];
+                size_t n = put_status(st, sc[i].present, sc[i].cal, sc[i].ver);
+                if (child_write(d, st, n)) {
+                    for (size_t j = 0; j < sc[i].nsteps; j++) {
+                        if (!child_read(d, hdr, 5)) break;
+                        uint32_t plen = (uint32_t)hdr[1] | ((uint32_t)hdr[2] << 8)
+                                      | ((uint32_t)hdr[3] << 16) | ((uint32_t)hdr[4] << 24);
+                        unsigned char skip[FAKE_STEP_CAP];
+                        if (plen > sizeof skip) break;
+                        if (plen && !child_read(d, skip, plen)) break;
+                        cmds++;
+                        if (sc[i].steps[j].len &&
+                            !child_write(d, sc[i].steps[j].buf, sc[i].steps[j].len)) break;
+                    }
+                    /* Wait for the client to hang up rather than closing here,
+                     * so the reconnect is the client's decision. A close would
+                     * hand it an EOF and a different code path. */
+                    for (;;) {
+                        unsigned char junk[64];
+                        ssize_t r = read(d, junk, sizeof junk);
+                        if (r <= 0) break;
+                    }
+                }
+            }
+            close(d);
+            if (write(pipefd[1], &cmds, 1) != 1) break;
+        }
+        close(pipefd[1]);
+        close(lfd);
+        _exit(0);
+    }
+
+    close(pipefd[1]);
+    close(lfd);
+    s->report = pipefd[0];
+}
+
+/* Returns how many sessions the daemon completed, filling counts[]. */
+static size_t server_stop(struct server *s, unsigned char *counts, size_t cap) {
+    size_t n = 0;
+    while (n < cap) {
+        ssize_t r = read(s->report, counts + n, 1);
+        if (r != 1) break;
+        n++;
+    }
+    close(s->report);
+    int st = 0;
+    assert(waitpid(s->pid, &st, 0) == s->pid);
+    unlink(s->path);
+    return n;
+}
+
+static void test_reconnect_regates_an_upgraded_daemon(void) {
+    /* THE REGRESSION. gz_client_reconnect goes through gz_client_init, which
+     * memsets the client and clears have_status and version_mismatch. Session 1
+     * is a version this build knows and then goes silent, forcing a reconnect.
+     * Session 2 is a version it does not know, and is primed to answer the
+     * geometry correctly, so a gate that failed to re-check would decode a
+     * clean 164-byte body under a grammar it had just been told may have moved.
+     * The session-2 command count proves it never asked. */
+    struct conn_script sc[2];
+    memset(sc, 0, sizeof sc);
+    sc[0].present = 1; sc[0].ver = GZ_PROTOCOL_VERSION;
+    sc[0].nsteps = 1;  step_silent(&sc[0].steps[0]);
+    sc[1].present = 1; sc[1].ver = GZ_PROTOCOL_VERSION + 1;
+    sc[1].nsteps = 1;  step_da(&sc[1].steps[0], real_panel);
+
+    struct server s;
+    server_start(&s, sc, 2);
+
+    struct gz_client c;
+    assert(gz_client_connect(&c, s.path) == 0);
+    assert(gz_display_gate(&c, s.path, real_panel, GZ_DA_TOL_MM, GZ_DA_TOL_DEG)
+           == GZ_GATE_UNKNOWN);
+    gz_client_close(&c);
+
+    unsigned char counts[SRV_MAX_CONN];
+    assert(server_stop(&s, counts, SRV_MAX_CONN) == 2);
+    assert(counts[0] == 1);   /* the command that went unanswered */
+    assert(counts[1] == 0);   /* nothing asked of the daemon it does not know */
+}
+
+static void test_reconnect_regates_a_daemon_that_lost_its_device(void) {
+    /* The same door, a different refusal: the reconnect lands on a daemon whose
+     * tracker has gone. Reading a geometry from it is meaningless. */
+    struct conn_script sc[2];
+    memset(sc, 0, sizeof sc);
+    sc[0].present = 1; sc[0].ver = GZ_PROTOCOL_VERSION;
+    sc[0].nsteps = 1;  step_silent(&sc[0].steps[0]);
+    sc[1].present = 0; sc[1].ver = GZ_PROTOCOL_VERSION;
+    sc[1].nsteps = 1;  step_da(&sc[1].steps[0], real_panel);
+
+    struct server s;
+    server_start(&s, sc, 2);
+    struct gz_client c;
+    assert(gz_client_connect(&c, s.path) == 0);
+    assert(gz_display_gate(&c, s.path, real_panel, GZ_DA_TOL_MM, GZ_DA_TOL_DEG)
+           == GZ_GATE_UNKNOWN);
+    gz_client_close(&c);
+
+    unsigned char counts[SRV_MAX_CONN];
+    assert(server_stop(&s, counts, SRV_MAX_CONN) == 2);
+    assert(counts[1] == 0);
+}
+
+static void test_reconnect_succeeds_against_the_same_daemon(void) {
+    /* Pairs with the two above: without this, "refused after reconnecting"
+     * would be indistinguishable from "reconnecting is broken". Session 2 is
+     * the same version and answers correctly, and the gate passes. */
+    struct conn_script sc[2];
+    memset(sc, 0, sizeof sc);
+    sc[0].present = 1; sc[0].ver = GZ_PROTOCOL_VERSION;
+    sc[0].nsteps = 1;  step_silent(&sc[0].steps[0]);
+    sc[1].present = 1; sc[1].ver = GZ_PROTOCOL_VERSION;
+    sc[1].nsteps = 1;  step_da(&sc[1].steps[0], real_panel);
+
+    struct server s;
+    server_start(&s, sc, 2);
+    struct gz_client c;
+    assert(gz_client_connect(&c, s.path) == 0);
+    assert(gz_display_gate(&c, s.path, real_panel, GZ_DA_TOL_MM, GZ_DA_TOL_DEG)
+           == GZ_GATE_OK);
+    gz_client_close(&c);
+
+    unsigned char counts[SRV_MAX_CONN];
+    assert(server_stop(&s, counts, SRV_MAX_CONN) == 2);
+    assert(counts[0] == 1 && counts[1] == 1);
+}
+
+static void test_the_shipped_path_refuses_a_mismatch(void) {
+    /* One straight run of the production path, no reconnect: connect by socket
+     * path, gate with that same path in hand, wrong geometry. */
+    struct conn_script sc[1];
+    memset(sc, 0, sizeof sc);
+    sc[0].present = 1; sc[0].ver = GZ_PROTOCOL_VERSION;
+    sc[0].nsteps = 1;
+    struct gz_rect placeholder = { 1500, 1000, -750, -500, 0, 0 };
+    step_da(&sc[0].steps[0], placeholder);
+
+    struct server s;
+    server_start(&s, sc, 1);
+    struct gz_client c;
+    assert(gz_client_connect(&c, s.path) == 0);
+    assert(gz_display_gate(&c, s.path, real_panel, GZ_DA_TOL_MM, GZ_DA_TOL_DEG)
+           == GZ_GATE_MISMATCH);
+    gz_client_close(&c);
+
+    unsigned char counts[SRV_MAX_CONN];
+    assert(server_stop(&s, counts, SRV_MAX_CONN) == 1);
+    assert(counts[0] == 1);
+}
+
+/* ---------- a quad that is not a rectangle ---------- */
+
+static void test_a_skewed_quad_is_refused(void) {
+    /* gz_corners_to_rect takes the width from the top edge and the origin from
+     * bl, so a quad the daemon could never have written collapses into a
+     * rectangle on neither edge. Here it collapses onto exactly the geometry
+     * the config asks for, which is the whole danger: without the shape check
+     * the gate reports OK on corners that are not a display area. */
+    double skew[9] = { -298.5, 346, 0,  298.5, 346, 0,  -298.5, 10, 0 };
+    skew[6] = -260.0;   /* bl.x pulled in: tl.x != bl.x */
+
+    struct gz_rect r = gz_corners_to_rect(skew);
+    assert(r.w_mm == 597.0);            /* the top edge still measures right */
+    assert(r.ox_mm == -260.0);          /* but the origin is 38.5 mm off */
+    assert(gz_corners_are_rectangular(skew, GZ_DA_TOL_MM) == 0);
+    assert(gz_display_verify(skew, real_panel, GZ_DA_TOL_MM, GZ_DA_TOL_DEG) == -1);
+
+    /* A tilted top edge is the other way the shape can fail, and it is the one
+     * that would otherwise be absorbed by the tilt the conversion recovers. */
+    double lean[9] = { -298.5, 346, 0,  298.5, 352, 0,  -298.5, 10, 0 };
+    assert(gz_corners_are_rectangular(lean, GZ_DA_TOL_MM) == 0);
+    assert(gz_display_verify(lean, real_panel, GZ_DA_TOL_MM, GZ_DA_TOL_DEG) == -1);
+
+    double lean_z[9] = { -298.5, 346, 0,  298.5, 346, 9,  -298.5, 10, 0 };
+    assert(gz_corners_are_rectangular(lean_z, GZ_DA_TOL_MM) == 0);
+
+    /* The real device is rectangular, and a genuine tilt still is: the tilt
+     * moves the whole top edge together, so tr stays level with tl. */
+    double good[9];
+    gz_rect_to_corners(real_panel, good);
+    assert(gz_corners_are_rectangular(good, GZ_DA_TOL_MM) == 1);
+    struct gz_rect tilted = { 597, 336, -298.5, 10, 25, -12.5 };
+    gz_rect_to_corners(tilted, good);
+    assert(gz_corners_are_rectangular(good, GZ_DA_TOL_MM) == 1);
+}
+
+static void test_the_gate_refuses_a_skewed_quad_on_the_wire(void) {
+    double skew[9] = { -298.5, 346, 0,  298.5, 346, 0,  -260.0, 10, 0 };
+    struct step s[1];
+    unsigned char body[256];
+    size_t n = build_da(body, skew);
+    s[0].len = put_response(s[0].buf, GZ_CMD_GET_DISPLAY_AREA, body, n);
+
+    struct fake f;
+    fake_start(&f, 1, 0, GZ_PROTOCOL_VERSION, s, 1, 0);
+    assert(gz_display_gate(&f.c, NULL, real_panel, GZ_DA_TOL_MM, GZ_DA_TOL_DEG)
+           == GZ_GATE_MISMATCH);
+    assert(fake_stop(&f) == 1);
+}
+
 int main(void) {
     test_config_matches_the_shipped_file();
     test_config_key_order_does_not_matter();
@@ -705,6 +1042,7 @@ int main(void) {
     test_config_accepts_a_valid_json_escape();
 
     test_verify_accepts_the_real_geometry_and_refuses_a_wrong_one();
+    test_the_success_caveat_follows_the_verdict();
 
     test_gate_passes_on_a_matching_device();
     test_gate_refuses_a_mismatched_device();
@@ -720,6 +1058,15 @@ int main(void) {
     test_read_reports_a_dead_link();
     test_gaze_traffic_does_not_disturb_the_gate();
     test_a_reply_to_another_command_is_not_the_answer();
+    test_the_library_entry_prints_the_caveat();
+
+    test_reconnect_regates_an_upgraded_daemon();
+    test_reconnect_regates_a_daemon_that_lost_its_device();
+    test_reconnect_succeeds_against_the_same_daemon();
+    test_the_shipped_path_refuses_a_mismatch();
+
+    test_a_skewed_quad_is_refused();
+    test_the_gate_refuses_a_skewed_quad_on_the_wire();
 
     printf("all display tests passed\n");
     return 0;

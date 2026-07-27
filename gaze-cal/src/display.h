@@ -63,9 +63,12 @@ int gz_config_load_rect(const char *path, struct gz_rect *out);
  * the offset from the area's centre, or -1. Exposed for its tests. */
 int gz_parse_anchor_expr(const char *s, double half, int is_vertical, double *out);
 
-/* Prints the comparison and returns 0 only when every field agrees. Prints the
- * refusal text on a mismatch: the operator has to be told what to do, because
- * the remedy is a daemon flag rather than anything gaze-cal can do itself. */
+/* Prints the comparison and returns 0 only when the corners really are the
+ * rectangle setDisplayArea writes AND every field agrees. Prints the refusal
+ * text on a mismatch, because the remedy is a daemon flag rather than anything
+ * gaze-cal can do itself, and prints the unmeasured-mounting caveat on success,
+ * because an OK here is the only thing standing between a calibration and a
+ * wrong one. Every caller inherits both; none has to remember to repeat them. */
 int gz_display_verify(const double got[9], struct gz_rect want,
                       double tol_mm, double tol_deg);
 
@@ -77,7 +80,13 @@ int gz_display_verify(const double got[9], struct gz_rect want,
  *
  * `path` is the socket to reconnect through, or NULL to give up instead. The
  * timeout is a parameter so the tests can exercise the give-up path without
- * spending GZ_CLIENT_CMD_TIMEOUT_MS on every case. */
+ * spending GZ_CLIENT_CMD_TIMEOUT_MS on every case, and it doubles as the
+ * deadline for the status frame the re-gate below waits for.
+ *
+ * A reconnect RE-RUNS gz_display_gate_status before sending anything, because
+ * gz_client_reconnect goes through gz_client_init and clears both have_status
+ * and version_mismatch. A restart between the two connections can put a
+ * different daemon build on the other end. */
 int gz_display_read(struct gz_client *c, const char *path, int timeout_ms,
                     double out[9]);
 

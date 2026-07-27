@@ -249,6 +249,13 @@ struct gz_rect {
     double tilt_deg;       /* negative = top edge toward the user */
 };
 
+/* 1 when the three corners really describe the rectangle setDisplayArea builds:
+ * tl.x == bl.x, tr.y == tl.y and tr.z == tl.z. gz_corners_to_rect takes the
+ * width from the top edge and the origin from bl, which is where the daemon
+ * puts them, so a quad that satisfies neither converts to a rectangle matching
+ * neither edge and could pass the gate. Check this before converting. */
+int gz_corners_are_rectangular(const double c[9], double tol_mm);
+
 struct gz_rect gz_corners_to_rect(const double c[9]);
 
 /* setDisplayArea's forward map, so a round trip is testable and Task 13 can

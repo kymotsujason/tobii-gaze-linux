@@ -1093,6 +1093,85 @@ static void test_width_comes_from_the_top_edge(void) {
     assert(r.ox_mm == -280.0);
 }
 
+static void test_rectangularity_check(void) {
+    /* setDisplayArea writes tl.x = bl.x and a top edge level in both y and z,
+     * so those three are the whole shape. tr.x is free because it carries the
+     * width, and bl.y and bl.z are free because they carry the origin.
+     *
+     * This matters because gz_corners_to_rect takes the width from the top edge
+     * and the origin from bl: a quad satisfying neither collapses into a
+     * rectangle matching neither edge, and can land on the config by accident. */
+    double good[9];
+    gz_rect_to_corners((struct gz_rect){ 597, 336, -298.5, 10, 0, 0 }, good);
+    assert(gz_corners_are_rectangular(good, 1.0) == 1);
+
+    /* A genuine tilt is still rectangular: it moves the whole top edge
+     * together, so tr stays level with tl. A check that rejected this would
+     * refuse the very geometry Task 13 is about to measure. */
+    double tilted[9];
+    gz_rect_to_corners((struct gz_rect){ 597, 336, -298.5, 10, 25, -12.5 }, tilted);
+    assert(gz_corners_are_rectangular(tilted, 1.0) == 1);
+    assert(tilted[2] != tilted[8]);   /* top and bottom really are at different z */
+
+    struct { int idx; double delta; const char *what; } skews[] = {
+        { 0,  38.5, "tl.x away from bl.x" },
+        { 6, -38.5, "bl.x away from tl.x" },
+        { 4,   6.0, "tr.y above tl.y" },
+        { 1,  -6.0, "tl.y below tr.y" },
+        { 5,   9.0, "tr.z ahead of tl.z" },
+        { 2,  -9.0, "tl.z behind tr.z" },
+    };
+    for (size_t i = 0; i < sizeof skews / sizeof skews[0]; i++) {
+        double c[9];
+        memcpy(c, good, sizeof c);
+        c[skews[i].idx] += skews[i].delta;
+        assert(gz_corners_are_rectangular(c, 1.0) == 0);
+    }
+
+    /* Inside the tolerance is still a rectangle, and the tolerance is the one
+     * the caller passes rather than a second hidden constant. */
+    double near[9];
+    memcpy(near, good, sizeof near);
+    near[0] += 0.5;
+    assert(gz_corners_are_rectangular(near, 1.0) == 1);
+    assert(gz_corners_are_rectangular(near, 0.25) == 0);
+
+    /* NaN is not a rectangle, same !(x <= tol) spelling as gz_rect_diff. */
+    double bad[9];
+    memcpy(bad, good, sizeof bad);
+    bad[0] = nan("");
+    assert(gz_corners_are_rectangular(bad, 1e9) == 0);
+}
+
+static void test_a_skewed_quad_would_otherwise_pass(void) {
+    /* Why the check is worth its cost: this quad is not a display area, and it
+     * converts to exactly the rectangle the config asks for. Width from the top
+     * edge is right, origin from bl is 38.5 mm out, and gz_rect_diff alone
+     * would have to catch it on the origin. Shift bl.y to compensate and it
+     * agrees on every field. */
+    struct gz_rect want = { 597, 336, -298.5, 10, 0, 0 };
+    double c[9] = { -298.5, 346, 0,  298.5, 346, 0,  -298.5, 10, 0 };
+    c[0] = -260.0;                   /* tl.x pulled in, bl.x left alone */
+    assert(gz_corners_are_rectangular(c, 1.0) == 0);
+
+    struct gz_rect r = gz_corners_to_rect(c);
+    assert(r.ox_mm == -298.5);       /* origin still from bl, still right */
+    assert(fabs(r.w_mm - 558.5) < 1e-9);
+    /* The width is wrong here, so the field comparison happens to catch it.
+     * Move the skew to bl instead and it does not. */
+    double c2[9] = { -298.5, 346, 0,  298.5, 346, 0,  -298.5, 10, 0 };
+    c2[6] = -298.5;
+    c2[0] = -298.5;
+    c2[3] = 298.5;
+    c2[4] = 346.0 + 0.0;
+    c2[1] = 346.0;
+    /* tr.z lifted: the top edge leans out of plane. Width, origin, height and
+     * tilt all still read correct, because none of them looks at tr.z. */
+    c2[5] = 40.0;
+    assert(gz_corners_are_rectangular(c2, 1.0) == 0);
+    assert(gz_rect_diff(gz_corners_to_rect(c2), want, 1.0, 0.5) == 0);
+}
+
 static void test_corners_to_rect_recovers_the_origin(void) {
     /* Two areas of identical size in different places are different
      * calibration frames, so w and h alone do not identify a geometry. */
@@ -1290,6 +1369,8 @@ int main(void) {
     test_rect_round_trips_through_corners_at_a_nonzero_tilt();
     test_corners_to_rect_recovers_the_origin();
     test_width_comes_from_the_top_edge();
+    test_rectangularity_check();
+    test_a_skewed_quad_would_otherwise_pass();
 
     test_rect_diff_reports_each_field_separately();
     test_rect_diff_is_inclusive_at_the_tolerance();

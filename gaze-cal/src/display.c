@@ -314,18 +314,50 @@ static void print_rect(const char *label, struct gz_rect r) {
             label, r.w_mm, r.h_mm, r.ox_mm, r.oy_mm, r.z_mm, r.tilt_deg);
 }
 
+static void print_corners(const double c[9]) {
+    fprintf(stderr, "  corners  TL=(%.1f,%.1f,%.1f) TR=(%.1f,%.1f,%.1f) BL=(%.1f,%.1f,%.1f)\n",
+            c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8]);
+}
+
 int gz_display_verify(const double got[9], struct gz_rect want,
                       double tol_mm, double tol_deg) {
+    /* Before converting, not after. gz_corners_to_rect takes the width from the
+     * top edge and the origin from bl, so a quad the daemon could never have
+     * written collapses into a rectangle that matches neither edge and could
+     * agree with the config by accident. */
+    if (!gz_corners_are_rectangular(got, tol_mm)) {
+        fprintf(stderr, "display area: NOT A RECTANGLE\n");
+        print_corners(got);
+        fprintf(stderr,
+            "REFUSING TO CALIBRATE. setDisplayArea always writes tl.x = bl.x and a\n"
+            "level top edge, so these corners did not come from any geometry the\n"
+            "daemon set. Converting them would produce a rectangle matching neither\n"
+            "edge. Read the device again, and if it persists, restart the daemon as\n"
+            "tobiifreed --force-display-area.\n");
+        return -1;
+    }
+
     struct gz_rect r = gz_corners_to_rect(got);
     unsigned d = gz_rect_diff(r, want, tol_mm, tol_deg);
 
     fprintf(stderr, "display area: %s\n", d == 0 ? "OK" : "MISMATCH");
     print_rect("device", r);
     print_rect("config", want);
-    fprintf(stderr, "  corners  TL=(%.1f,%.1f,%.1f) TR=(%.1f,%.1f,%.1f) BL=(%.1f,%.1f,%.1f)\n",
-            got[0], got[1], got[2], got[3], got[4], got[5], got[6], got[7], got[8]);
+    print_corners(got);
 
-    if (d == 0) return 0;
+    if (d == 0) {
+        /* THE CAVEAT FOLLOWS THE VERDICT, not the CLI. gz_display_gate is the
+         * library entry Task 13 was told to use, and an OK from it is the only
+         * thing standing between a calibration and a wrong one. A readback
+         * cannot tell an unmeasured 0 from a measured one, so whoever sees the
+         * OK has to see this too. */
+        fprintf(stderr,
+            "NOTE: this proves the device holds what the config asks for. It does\n"
+            "not prove the config is right. z_mm, tilt, cx and cy are the daemon's\n"
+            "template defaults unless somebody measured them, and no readback can\n"
+            "tell an unmeasured 0 from a measured one.\n");
+        return 0;
+    }
 
     /* Named individually. "MISMATCH" alone sends the operator to remeasure the
      * panel when the disagreement is an origin they never set. */
@@ -411,6 +443,23 @@ int gz_display_read(struct gz_client *c, const char *path, int timeout_ms,
             if (gz_client_reconnect(c, path) != 0) {
                 fprintf(stderr, "reconnect %s: %s\n", path, strerror(errno));
                 return GZ_CLIENT_RECONNECT;
+            }
+            /* RE-GATE. gz_client_reconnect goes through gz_client_init, which
+             * memsets the client and so clears have_status and
+             * version_mismatch. Without this the loop would send the next
+             * command to a daemon it has never identified: a restart between
+             * the two connections can put a different build on the other end,
+             * and its body would be decoded under the grammar the first one
+             * agreed to. That is the exact failure the version gate exists to
+             * prevent, reached through the one door it did not cover.
+             *
+             * The command timeout doubles as the status deadline. Both ask the
+             * same question, how long to wait for the daemon to say anything,
+             * and the daemon's status is the first frame on every connection. */
+            if (gz_display_gate_status(c, timeout_ms) != 0) {
+                fprintf(stderr, "display area: the reconnected daemon did not pass "
+                                "the status gate, refusing\n");
+                return -1;
             }
             continue;
         }
@@ -503,6 +552,10 @@ int gz_cmd_display(const char *sock_path, const char *cfg_path, double tol_mm) {
         return 2;
     }
 
+    /* Named because the caveat gz_display_verify prints on success says "the
+     * config" without knowing which file that was. */
+    fprintf(stderr, "config: %s\n", cfg_path);
+
     struct gz_client c;
     if (gz_client_connect(&c, sock_path) != 0) {
         fprintf(stderr, "connect %s: %s\n", sock_path, strerror(errno));
@@ -511,11 +564,5 @@ int gz_cmd_display(const char *sock_path, const char *cfg_path, double tol_mm) {
 
     int rc = gz_display_gate(&c, sock_path, want, tol_mm, GZ_DA_TOL_DEG);
     gz_client_close(&c);
-    if (rc != GZ_GATE_OK) return rc;
-
-    fprintf(stderr,
-            "NOTE: this proves the device holds what %s asks for. It does not\n"
-            "prove the file is right: z_mm, tilt, cx and cy there are the daemon's\n"
-            "template defaults unless someone measured them.\n", cfg_path);
-    return 0;
+    return rc;
 }

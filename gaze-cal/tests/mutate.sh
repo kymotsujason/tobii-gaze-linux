@@ -272,6 +272,21 @@ run_mutation "width read from the wrong corner pair" proto.c \
     "    r.w_mm     = fabs(c[3] - c[0]); /* tr.x - tl.x */" \
     "    r.w_mm     = fabs(c[3] - c[6]); /* tr.x - tl.x */"
 
+run_mutation "left edge skew accepted" proto.c \
+    "    if (!(fabs(c[0] - c[6]) <= tol_mm)) return 0;   /* tl.x vs bl.x */" "    ;"
+
+run_mutation "top edge y lean accepted" proto.c \
+    "    if (!(fabs(c[4] - c[1]) <= tol_mm)) return 0;   /* tr.y vs tl.y */" "    ;"
+
+run_mutation "top edge z lean accepted" proto.c \
+    "    if (!(fabs(c[5] - c[2]) <= tol_mm)) return 0;   /* tr.z vs tl.z */" "    ;"
+
+# A shape check strict enough to reject a genuinely tilted panel is as bad as
+# none: it would refuse the geometry Task 13 is about to measure.
+run_mutation "shape check also demands a flush panel" proto.c \
+    "    if (!(fabs(c[5] - c[2]) <= tol_mm)) return 0;   /* tr.z vs tl.z */" \
+    "    if (!(fabs(c[5] - c[8]) <= tol_mm)) return 0;   /* tr.z vs tl.z */"
+
 run_mutation "origin x dropped from the comparison" proto.c \
     "    if (!(fabs(got.ox_mm    - want.ox_mm)    <= tol_mm))  d |= GZ_DA_DIFF_OX;" "    ;"
 
@@ -321,7 +336,7 @@ run_mutation "a mismatch is reported as unreadable" display.c \
     return GZ_GATE_UNKNOWN;"
 
 run_mutation "verify passes whatever it is given" display.c \
-    "    if (d == 0) return 0;" "    return 0;"
+    "    unsigned d = gz_rect_diff(r, want, tol_mm, tol_deg);" "    unsigned d = 0;"
 
 run_mutation "an unparseable reply is accepted" display.c \
     "            if (gz_decode_display_area(c->resp, c->resp_len, out)) return 0;" \
@@ -349,6 +364,24 @@ run_mutation "retry budget cut to two" display.c \
 run_mutation "a timeout is retried on the same connection" display.c \
     "            if (path == NULL || attempt + 1 == GZ_DA_RETRIES) {" \
     "            if (0) {"
+
+# The Important finding from the Task 12 review. gz_client_reconnect goes
+# through gz_client_init, which memsets the client and clears have_status and
+# version_mismatch, so without the re-gate the loop commands a daemon it has
+# never identified. Every earlier test passed path == NULL and missed it.
+run_mutation "version gate dropped on reconnect" display.c \
+    "            if (gz_display_gate_status(c, timeout_ms) != 0) {" "            if (0) {"
+
+run_mutation "skewed quad converted instead of refused" display.c \
+    "    if (!gz_corners_are_rectangular(got, tol_mm)) {" "    if (0) {"
+
+run_mutation "success caveat dropped from the verdict" display.c \
+    "    if (d == 0) {" "    if (d == 0) return 0;
+    if (0) {"
+
+run_mutation "caveat also printed on a refusal" display.c \
+    "    fprintf(stderr, \"  differs:\");" \
+    "    fprintf(stderr, \"z_mm, tilt, cx and cy are the daemon's\\n  differs:\");"
 
 run_mutation "config parse failure falls back to the daemon's template" display.c \
     "    if (j.pos != j.n) return -2;
