@@ -128,10 +128,19 @@ All of these were assumptions that measurement disproved. Do not re-derive them.
   every reconnect, or it receives zero samples with no error
 - `response` (0x02) frames prepend a one-byte `cmd_type`, so their body starts at offset
   6, not 5
-- `~/.config/tobii.json` does not exist, and the daemon wrote a **1500x1000 mm
-  placeholder** geometry to the device. Task 5's `--force-display-area` exists to correct
-  this, and correct geometry must precede calibration
-- Display area persists on-device across sessions
+- `~/.config/tobii.json` **now exists**, written during Task 5, and the 1500x1000 mm
+  placeholder is gone. The device holds geometry built from that file. **Only `w_mm` 597
+  and `h_mm` 336 are measured**, being the DP-1-2 active area recorded in CLAUDE.md.
+  `z_mm`, `tilt`, `cx` and `cy` are byte-identical copies of the daemon's own
+  `--init-config` template and are **NOT measurements**
+- **Task 13 must measure the mounting parameters before calibration is trusted.**
+  Calibration is computed in the display-area frame, so calibrating against an unmeasured
+  `z_mm` and `cy` produces a plausible-but-wrong frame, which is the exact failure Task 5
+  exists to escape. `--force-display-area` is how you correct it afterwards
+- Display area persists on-device across daemon restarts, confirmed by readback rather
+  than inference: a no-flag restart reports `device display: TL=(-299,346,0)
+  TR=(299,346,0) BL=(-299,10,0)`, which is 598 x 336 mm. Persistence across a device
+  power cycle is NOT proven, and `isReset()` exists because it does not always hold
 
 ## The patch workflow, which is subtle and cost three fix rounds
 

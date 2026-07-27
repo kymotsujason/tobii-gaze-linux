@@ -250,13 +250,20 @@ c["display_area"] = {
     "h_mm": 336.0,     # active area height
     "z_mm": 0.0,       # tracker plane to screen plane, MEASURE
     "tilt": 0.0,       # screen tilt in degrees, MEASURE
-    "cx": "center",    # horizontal tracker position relative to screen
-    "cy": "bottom",    # vertical
+    "cx": "c",         # horizontal tracker position relative to screen
+    "cy": "b - 10",    # vertical, MEASURE the mm below the screen edge
 }
 p.write_text(json.dumps(c, indent=2))
 print(p.read_text())
 EOF
 ```
+
+`cx` and `cy` accept a number or an anchor expression, and the grammar is narrow:
+`evalAnchorExpr` (`main.zig`) reads exactly ONE anchor character (`t`, `b`, `l`, `r` or
+`c`) followed by an optional signed offset. Words like `"center"` and `"bottom"` parse to
+null, and the value then falls back silently to the `DisplayArea` default of -750, which
+is a wrong-but-plausible geometry of exactly the kind Task 5 exists to escape. Write `"c"`
+or `"b - 10"`, never `"center"`.
 
 - [ ] **Step 2: Write the spike script**
 

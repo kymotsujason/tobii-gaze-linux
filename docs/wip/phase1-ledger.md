@@ -228,3 +228,48 @@ Task 4: REVIEWED, APPROVED (task-4-review-verdict.md), then a four-change fix ro
   25/25 driver tests (was 24). The new one feeds a 100000-byte response frame through
     feed_usb_in and asserts on_response receives it intact, proving the guard's
     precondition is real rather than assumed.
+Task 5: complete (commit b029663, patches/0003-force-display-area.patch, review APPROVED
+  after the one blocking finding was resolved). Spec compliance FULLY MET, all five steps,
+  verbatim where the brief was verbatim.
+  DEVIATION, reviewer-approved and reproduced rather than argued: the argument loop was
+  restructured to push back the --ws lookahead. The pinned code did `continue` on a
+  lookahead starting with '-', and its own comment admitted that was only safe while
+  --init-config returned early. Without the fix, `tobiifreed --ws --force-display-area`
+  silently leaves the flag unset, which would have shipped a no-op flag on a daemon whose
+  entire purpose is preventing silent geometry errors. The reviewer lifted both loops into
+  standalone programs and ran them under zig 0.15.2.
+  EXACTLY TWO invocations changed meaning, both previously nonsense:
+    --ws --init-config: pinned dropped --init-config and ran the daemon; now it runs
+      initConfig and exits, which is plainly the intended reading.
+    --ws --ws 1234: pinned kept port 7081; now sets 1234.
+  No documented invocation changed, and the usage comment never listed --ws.
+  BEHAVIOUR CHANGE the brief intended but did not spell out: a failed geometry write is
+  now fatal on the GENUINE RESET path too, not only under the flag. Correct under spec
+  section 11, since a device reporting under 50 mm is definitively wrong, but it changes
+  the no-flag invocation.
+  CONTROLLER-CONFIRMED ON HARDWARE: device readback after a full restart is
+  TL=(-299,346,0) TR=(299,346,0) BL=(-299,10,0), so 598 x 336 mm really is stored on the
+  device. Stronger than the config-load line, which only proves the file parsed.
+Task 5: BLOCKING FINDING I-1, resolved by controller, no code change. docs/RESUME-phase1.md
+  still said the config did not exist and the device held the 1500x1000 placeholder. Task 5
+  made both false, and the accurate record lived only under .superpowers/, which is
+  gitignored. A later session could have read RESUME, believed the mounting parameters were
+  still unset, and run Task 13's calibration against unmeasured z_mm and cy. Fixed: RESUME
+  now records what is measured (w_mm 597, h_mm 336) versus what is a template default
+  (z_mm, tilt, cx, cy), and states that Task 13 must measure before calibration is trusted.
+Task 5: PLAN DEFECT found by the reviewer and fixed by controller. The plan's Task 3 Step 1
+  snippet proposed "cx": "center" and "cy": "bottom". evalAnchorExpr reads exactly ONE
+  anchor character then an optional signed offset, so "center" hits 'e' and returns null,
+  and ox_mm falls back silently to the DisplayArea default of -750. Both corrected to "c"
+  and "b - 10", with the grammar documented beside the snippet so it cannot recur.
+Task 5: minor (deferred): std.process.exit(1) on the new fatal path skips
+  `defer transport.deinit()`, which sends vendor control 0x42 session-close
+  (libusb_transport.zig:106-111). Only exit in main that abandons rather than closes the
+  session. Probably harmless since the kernel releases the interface, but untested.
+Task 5: minor (deferred to Task 12, which already edits this block): the genuine reset path
+  now logs neither "forcing display area from config" nor "preserved from previous
+  session", so it is identifiable only by the absence of both. The brief's verbatim Step 2
+  code dropped the old "device display area looks reset, applying config" line.
+Task 5: minor (noted): patch header index blob fd9e7e4 is the post-0000 blob, not the
+  pinned blob. Harmless, git apply consults the hash only when context fails to match, and
+  the reviewer proved context matches both alone and in the stack.
