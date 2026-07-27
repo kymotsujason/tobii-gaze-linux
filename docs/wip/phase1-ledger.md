@@ -670,3 +670,54 @@ Task 9 fix round: the eof spin was real and measured. One half-closed client hol
   measured at 5.02s. Needed a throwaway instrumented binary, since the DEVICE ANSWERS
   EVERY forwarded command it was given, including add_calibration_point outside a
   calibration session, which replied in 0.02s. That is worth knowing for Task 13.
+Task 9: fix round 1/5 (7 addressed, 0 open; commits 9153da6..54539ff). Re-review verdict
+  ALL FIXES ADDRESSED, no new breakage. Method was strong: the re-reviewer reconstructed
+  the pin TWICE, once with the patch set before the fix and once after, and diffed the
+  results, so it judged exactly what this round changed rather than the cumulative patch.
+  Fix 1 both halves confirmed. Dropping POLL.IN for eof fds loses nothing an eof peer can
+  still send, and the buffered-command case is not stranded because pendingWorkLocked
+  forces timeout = 0. Losing POLLOUT costs at most one 50 ms tick of flush latency.
+  Fix 2 confirmed NOT a deadlock: the subscribe branch returns before forward_fn, so the
+  new lock scope is three lines and never spans forwardCommand.
+  Fix 4 confirmed properly monotonic: std.time.Instant.now() is CLOCK.BOOTTIME on Linux,
+  which no NTP step can move, and it was applied to BOTH the stall clock and the eof
+  deadline.
+  Fix 6 came out stronger than asked: Target became a union(enum), so a socket target
+  carries no fd field at all and the compiler enforces it, rather than a comment.
+  Fix 5 rename verified by direction: 0008 uses proto.STATUS_SIZE, proto.encodeStatus and
+  core.pending_evictions; 0007 references no daemon symbol at all and is a pure rename with
+  ZERO content lines changed.
+Task 9: the "device answered every command" finding STRENGTHENS Fix 1 rather than weakening
+  it, and the re-reviewer's reasoning is worth keeping. Device silence was never the only
+  generator of an unresolved hold: the core's 32-entry seq table discards an evicted
+  request's response BEFORE pendingTake, so the hold is never released even though the
+  device answered; USB loss short of a full reconnect does the same; a reply slower than
+  the deadline is the third. More decisively, the SPIN half needs no unanswered reply at
+  all, since any eof client free-ran the loop while it lingered, which is the ordinary
+  "send a batch then close" path. That half measured 92.5% -> 0.4%, against 0.4% -> 0.3%
+  for the deadline. So the finding lowers the priority of the deadline, not the
+  justification. And "the device answered every command in this session" is not "the device
+  answers every command".
+Task 9: NO INSTRUMENTATION LEAKED, checked beyond my own TOBII_TEST grep: no getenv,
+  std.process, _TEST, instr, tobiifreed-instr, no_reply or drop_reply anywhere in either
+  patch or the working tree. The only getenv in the daemon is two pre-existing HOME lookups.
+Task 9: CARRY TO TASK 11, important for the client design: the daemon's guarantee is now
+  "a reply within 5 s of half-close, or never", so the client needs a READ TIMEOUT, not a
+  blocking read.
+Task 9: 5 s deadline kept. The drop is safe rather than merely unlikely: sendToRef
+  re-resolves the slot under the lock and compares gen, and acceptClients bumps slot_gen[i]
+  BEFORE writing the new Client literal, so no two occupants of a slot ever share a
+  generation. 5000 ms against 8 x 30 ms x 15 = 3600 ms is the right order. One term is
+  understated: forwardCommand calls usbPause, whose budget is 1 s, so one command hitting
+  that ceiling blows past 5 s, but that only happens when the USB thread has stopped
+  polling, which is the reconnect path, and reconnect runs failPending and answers every
+  entry anyway, so the gap closes itself.
+Task 9: WIRE FORMAT STILL FROZEN-SAFE after the fix round. daemon_protocol.zig is
+  byte-identical across the fix diff. The only behavioural deltas touch the VALUE of the
+  existing cal byte, never a message type, field order, width or endianness, and both make
+  cal=0 where the daemon cannot back a cal=1 claim.
+Task 9: complete (commits 7b090b7..54539ff, review APPROVED after one fix round,
+  2 Importants resolved, 5 minors resolved, 3 recorded)
+ALL DAEMON PATCH TASKS COMPLETE. patches/ holds eight patches, 0000 through 0005 plus 0007
+  and 0008, and they reconstruct the vendor tree byte-identically from the pin d303e47.
+  Tasks 10 onward build the C client.
