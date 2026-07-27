@@ -1327,3 +1327,21 @@ UNCALIBRATED BASELINE CAPTURED, 9 of 9 points, lights on, at the real playing po
   median error 250 px, worst 401 px, eye distance median 586 mm. Every point reads HIGH
   (dy negative from -98 to -336), which is the systematic bias calibration should remove.
   This is the "before" number for the persistence comparison.
+CALIBRATION SUCCEEDED, lights on, 2026-07-27. All nine points at 100% both-eyes with two
+  retries on point 3. Blob is 1480 bytes, well under the 4096 cap, crc 7b74e8ab, saved to
+  ~/.local/share/tobii-gaze/calibration.bin BEFORE being applied. cal_apply accepted in
+  36.4 ms.
+TASK 11'S OPEN QUESTION IS ANSWERED, and it was the cheap falsifier the reviewer asked for.
+  Per-command USB park times during a real calibration: start_calibration 32.8 ms, the nine
+  add_calibration_point calls 6.9 to 21.4 ms, finish_calibration 6.9 ms, and the WORST GAZE
+  GAP WAS 31 ms against a 1000 ms watchdog. So a second subscribed client, which is exactly
+  the Phase 2 overlay running while someone recalibrates, rides out a calibration without
+  its watchdog firing. The 1 s default stands, with 30x margin measured rather than argued.
+CONTROLLER BUG FIX, found while the user sat waiting at an apparently hung script:
+  scripts/task13-persistence.sh called run_accuracy as A=$(run_accuracy ...), and both
+  pause()'s prompt and the accuracy output printed to STDOUT, which command substitution
+  swallows. So the script was correctly waiting on `read` at an INVISIBLE prompt, and the
+  operator would also have been blind through all four accuracy passes. Both now print to
+  stderr. Step C's unplug prompt was never affected, being at top level.
+  Fix made by the controller rather than the implementer because the user was blocked
+  mid-run; flag it to the Task 13 review.
