@@ -1299,3 +1299,31 @@ SEATING DISTANCE MEASURED AT ~549 mm, NOT the 600 mm the spec assumes. This matt
 NOTE: eye origin y was +47 mm, i.e. only 42 mm above the screen's bottom edge on a 333.7 mm
   tall panel, so the user's eyes sit low relative to this monitor. Recorded for Phase 2's
   viewing-angle assumptions, not actionable now.
+ROOM LIGHTING IS A HARD OPERATING REQUIREMENT, found 2026-07-27 and this is a PRODUCT
+  constraint, not a calibration workaround.
+  SYMPTOM: with the room lights OFF, the top-left stimulus point (0.1, 0.1) returned ZERO
+  valid frames across three consecutive calibrate runs and a NO VALID GAZE in accuracy,
+  while 8 of the other 9 points resolved.
+  I FIRST BLAMED THE TRACKER'S ANGULAR CONE AND THAT WAS WRONG. Computing each eye
+  separately, because the eyes are ~63 mm apart and sat left of centre, top-left demanded
+  34.8 degrees of the worst eye while top-RIGHT demanded 37.0 degrees, and top-right
+  WORKED. A cone limit cannot produce that asymmetry, which is what pointed at the
+  environment instead of the geometry.
+  FIX: turn the room lights ON. Immediately 9 of 9 points resolved. Two mechanisms, both
+  plausible and neither ruled out: a nearby window floods the scene with infrared, which
+  saturates the sensor asymmetrically depending on which way the face turns, and a dark
+  room dilates the pupil, which is harder to track at extreme gaze angles than a
+  constricted one.
+  WHY THIS MATTERS BEYOND TASK 13: osu! is very often played in a dark room, and this
+  project's whole purpose is a gaze overlay for an osu! stream. If the streamer plays with
+  the lights off, the tracker will drop the upper corners of the playfield. Phase 2 must
+  surface tracking loss to the operator rather than silently freezing the overlay, which
+  spec section 11 already requires for device presence and should now also cover gaze
+  validity. Record in the spec's operating requirements.
+  Also note the eye distance moved 515 -> 586 mm between runs, so the user's seating varies
+  by roughly 70 mm run to run. Any constant derived from a single distance measurement is
+  therefore soft; Task 15's five-minute trace is the right source for a distribution.
+UNCALIBRATED BASELINE CAPTURED, 9 of 9 points, lights on, at the real playing position:
+  median error 250 px, worst 401 px, eye distance median 586 mm. Every point reads HIGH
+  (dy negative from -98 to -336), which is the systematic bias calibration should remove.
+  This is the "before" number for the persistence comparison.
