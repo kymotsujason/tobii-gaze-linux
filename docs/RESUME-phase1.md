@@ -67,25 +67,58 @@ A file survives a lost message.
 | 11. `gaze-cal` client | complete (`7dfac2a..1acfd89`) |
 | 12. Display area readback gate | complete (`d432926..e6dc84a`) |
 | 14. systemd user unit | complete (`ebf87fb..91520cb`), done out of order |
-| **13. Calibration + persistence experiment** | **BLOCKED, needs the human at the hardware** |
-| **15. Trace recorder** | **BLOCKED, needs five minutes of real osu** |
+| 13. Calibration + persistence experiment | ran on hardware; it REVEALED THE DEFECT below rather than completing. Spec section 13 item 2 is not answerable as posed |
+| **13b. Host-side gaze correction** | NEW, not in the plan. Form H shipped and reviewed clean; **form S in flight** |
+| **15. Trace recorder** | blocked behind 13b, needs five minutes of real osu |
 | 16. Refit filter constants | blocked behind 15, which produces its input |
 
 Every task carries a review verdict. Ten of the fourteen closed needed a fix round first.
 
+## The finding that reshaped Phase 1
+
+A real nine-point calibration was run on hardware and **had no measurable effect**: the
+calibrated, daemon-restarted, power-cycled and blob-reapplied conditions all sat in a
+250-285 px band alongside an **uncalibrated baseline of 250 px**.
+
+The investigation, in `.superpowers/sdd/.../cal-investigation.md`, excluded every
+alternative against data rather than argument. The device's display area, ray-plane
+intersection and normalisation are provably exact (7.5e-05 over 425 frames) and its 3D
+eye-position sensing is sound (reported IPD 65.56 mm sd 0.19 against a human-measured 65).
+**The error is in the gaze direction: an isotropic, distance-invariant gain of about 1.18
+plus an additive vertical offset.** The onboard calibration is live but its entire effect
+is a 4.6 mm eye-origin translation, which cannot express a gain, and no protocol command
+exists to set one.
+
+So the device cannot be told to fix this, and Phase 1 grew Task 13b, a host-side
+correction. Measured on hardware:
+
+| | median error |
+|---|---|
+| raw device output | 250-285 px (5.5 to 6.3 degrees) |
+| form H at the fitted position | **37 px, WITHIN one degree** |
+| form H after a real 112 mm head move | 69 px, outside |
+| form S after the same move | **52 px, the form to ship** |
+
+Spec test 5.3 decided against the head-aware form: **the scale centre is not the eye.**
+
 ## What the human still has to do
 
-1. **Measure the tracker mounting geometry.** `~/.config/tobii.json` has a measured
-   `w_mm` 597 and `h_mm` 336, but `z_mm`, `tilt`, `cx` and `cy` are the daemon's shipped
-   template defaults. Calibration is computed in that frame and the Task 12 gate CANNOT
-   catch a wrong value there, because it compares the device against the config's own
-   numbers. Note that measuring a real tilt is also the first thing that will ever exercise
-   Task 12's corrected formulas, since three of the plan's four were wrong only at nonzero
-   tilt and the device sits at 0 today.
-2. **The replug test**, `docs/physical-test-checklist.md`. Item 4 decides whether the ET5
-   keeps geometry across a power cycle, and therefore whether a whole branch of the
-   reconnect path is dead code or the critical path.
-3. **Then Task 13's nine-point calibration** and the persistence experiment.
+1. **One verify sweep once form S lands.** Nine dots, no movement, expect the corrected
+   median to beat form H's 69 px at a displaced position.
+2. **Task 15**, five minutes of real osu, which is now unblocked once form S is verified.
+   It must be recorded through a CORRECTED stream: a trace carrying the 18 percent gain
+   would poison every constant Task 16 fits, and would look like sensor noise rather than a
+   systematic scale.
+
+## Operating requirements found the hard way
+
+- **Room lights must be ON.** With them off this tracker returns zero valid frames at the
+  top-left point. Three runs were wasted before this was found, and it matters because osu
+  is often played in the dark. Phase 2 must surface gaze loss rather than freezing.
+- **Sit at about 600 mm, no closer than 520.** Nearer than that the top row of the screen
+  leaves the tracker's cone entirely, whatever the lighting.
+- The ET5 **loses its display geometry on a power cycle**, reading back 4x4 mm, which is
+  its reset state. The daemon's replay branch is therefore the critical path, not dead code.
 
 Briefs for every task are extracted in the workspace as `task-N-brief.md`. Regenerate with
 `scripts/task-brief PLAN_FILE N` from the skill directory.

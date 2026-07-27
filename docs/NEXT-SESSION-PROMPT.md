@@ -4,51 +4,48 @@
 Resume the Tobii ET5 gaze overlay project in /home/jason/Documents/tobii-eye-tracker.
 
 Read CLAUDE.md and docs/RESUME-phase1.md first. Between them they have the design, the
-measured hardware facts, the patch workflow, and the current task state. docs/wip/phase1-ledger.md
-has the execution record if you need detail.
+measured hardware facts, the patch workflow, and the current state.
+docs/wip/phase1-ledger.md is the full execution record; skim the entries dated 2026-07-27.
 
 We are executing docs/superpowers/plans/2026-07-26-phase1-bringup-and-daemon.md using the
-superpowers:subagent-driven-development skill, on branch feat/phase1-bringup. Tasks 1 and 2
-are complete. Continue to the end of Phase 1 (task 16).
+superpowers:subagent-driven-development skill, on branch feat/phase1-bringup. Opus 5 for
+implementers and reviewers. Do not close a task without a review verdict, and have
+reviewers WRITE their verdict to a file rather than only returning it, because the reply
+channel drops subagent messages.
 
-Use Opus 5 for both implementer and reviewer subagents. Do not downgrade to a cheaper model
-to work around a 529 error; retry, or verify it yourself and say so. Do not close a task
-without a review verdict, even if the reviewer goes silent.
+WHERE THINGS STAND. Tasks 1-12 and 14 are complete and reviewed. Task 13 ran a real
+calibration on hardware and revealed that the ET5's own calibration cannot fix an ~18
+percent isotropic gain in its gaze direction, so Phase 1 grew Task 13b, a host-side
+correction that is not in the plan. Form H of that correction is shipped and reviewed
+clean, measuring 37 px at the fitted position, inside the one-degree target, against
+250-285 px raw.
 
-Two things are waiting, in this order:
+THE ONE THING IN FLIGHT. An agent was implementing FORM S of the correction when the last
+session ended. Spec test 5.3 decided against the head-aware form: with a real 112 mm
+lateral head move, form H measured 69 px and form S 52 px, so the scale centre is not the
+eye. Check these before doing anything, since the work may already be done:
+  .superpowers/sdd/2026-07-26-phase1-bringup-and-daemon/task-13b-formS-summary.md
+  .superpowers/sdd/2026-07-26-phase1-bringup-and-daemon/task-13b-report.md
+  git log, for any commit after bc32a1f
+If form S landed it needs a scoped re-review and then ONE human verify sweep. If it did
+not, re-dispatch from correction-spec.md section 5.6 and the ledger entry headed
+"SPEC TEST 5.3 DECIDED".
 
-1. Task 3 is REOPENED with a confirmed Critical. scripts/spike-first-sample.sh kills the
-   daemon at 15s, but the "failed to connect" diagnostic needs ~20s to appear (200 handshake
-   steps x 100ms recv timeout), so the Windows-provisioning case produces the least useful
-   message in the script. The same 15s window also blinds the validity check, because sample
-   #500 lands at 15.06s at 33 Hz. Fix: sleep 15 -> sleep 22, plus an explicit
-   "handshake step present but handshake complete absent" branch, a trap to clean up the
-   temp log, and a bounded wait instead of the current unbounded one. Full detail is in
-   docs/RESUME-phase1.md.
+THEN. Task 15 records five minutes of real osu and needs the human. It must be recorded
+through a CORRECTED stream. Task 16 refits the overlay's filter constants against it.
 
-2. Task 4 is done and APPROVED, with a fix round committed on top. The quarantine at
-   docs/wip/task4-0006-calibration-buffers.UNVERIFIED.patch.txt was resolved: the patch
-   now lives at patches/0000-calibration-buffers.patch, renumbered from 0006 so it applies
-   before the five patches that get authored on top of it. Nothing to re-dispatch.
+WHAT THE HUMAN MUST DO. Room lights ON, and sit at about 600 mm, no closer than 520. Both
+are hard requirements found by measurement, not preferences. A verify sweep is nine dots
+and about 30 seconds. They have already run well over a dozen sweeps, a tape session and an
+IPD measurement, so ask for at most one thing at a time and say what it will decide.
 
-Task briefs for 4 through 9 are already extracted in
-.superpowers/sdd/2026-07-26-phase1-bringup-and-daemon/. Generate more with the skill's
-scripts/task-brief.
-
-Tasks 4 through 12 need nothing from me. Tasks 13 and 15 do: task 13 is a nine-point
-calibration plus a replug experiment that answers whether calibration persists, and task 15
-is five minutes of real osu to record a gaze trace. Tell me when you reach those.
-
-Start by confirming the environment still works: ./scripts/build.sh should succeed, and
-./scripts/check-device.sh should report PASS. Then fix task 3 and carry on.
+LEARNED THE HARD WAY, all of it earned:
+- Treat code quoted in the plan as a draft. Seven tasks found defects in plan-mandated code
+  and every one was caught by testing rather than reading.
+- When a number matters, ask where it came from. The display area was wrong for most of a
+  session because 597 x 336 was the plan's own example value carrying a MEASURE YOURS
+  comment, and it named a real but adjacent monitor.
+- Amending a patch needs `git diff HEAD`, not `git diff`. See CLAUDE.md.
+- Three refusals blocked plausible wrong answers: a partial-sweep fit, an anisotropic fit
+  that looked good at 31 px, and a stale-geometry log. Do not relax them.
 ```
-
-## Why this prompt is shaped that way
-
-It names the two files to read rather than restating their content, so the next session
-gets the full picture without you pasting a wall of text. It states the model policy and
-the no-silent-close rule explicitly, because both were learned the hard way and neither is
-recoverable from the code. It gives the two waiting items in dependency order with enough
-detail to act without reading everything first. And it ends with a cheap environment check,
-because a stale nix store or an unplugged tracker would otherwise be discovered three
-subagent dispatches later.
