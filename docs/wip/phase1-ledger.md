@@ -1026,3 +1026,31 @@ Task 12: FOR TASK 13, from the reviewer: re-run the gate after EVERY --force-dis
   the user); cy "b - 10" means ox/oy are recomputed from w_mm/h_mm, so editing either
   forces a re-force before the gate passes; and if the gate reconnects, treat the result as
   UNGATED until the Important above is fixed.
+Task 12: fix round 1/5 (3 addressed, 0 open; commits d432926..e6dc84a). Re-review verdict
+  ALL FIXES ADDRESSED, no new Critical or Important. make check killed=105,
+  documented_survivors=5, unexpected_survivors=0, verified by me, and BOTH gcc and clang
+  compile the test suite at -Werror (the clangd errors were a stale index, twice).
+  FIX 1 verified to cover EVERY reconnect on this surface, not just the tested one: exactly
+  one gz_client_reconnect call exists outside client.c, and neither gz_client_request nor
+  gz_client_poll reconnects internally. The command-count assertion CAN fail: pre-fix,
+  session 2 receives the command so counts[1]==1 and the gate returns OK, breaking two
+  asserts. The one false-pass route, where the client never sends subscribe so the child
+  never sends status and the refusal happens for the wrong reason with counts[1]==0, is
+  EXCLUDED by the paired same-version test, which requires counts[1]==1 AND GZ_GATE_OK. So
+  the pair discriminates more than "reconnecting is broken".
+  THE CHECK I MOST WANTED CONFIRMED: a GENUINE TILT PASSES with the whole budget unused.
+  rect {597, 336, ox -298.5, oy 10, z 25, tilt -12.5} gives TL=(-298.5, 338.035458,
+  -47.723710), TR=(298.5, 338.035458, -47.723710), BL=(-298.5, 10, 25), and all three
+  deltas are EXACTLY 0, bit-identical, because proto.c and tracker.zig both COPY tl_y/tl_z
+  into tr rather than recomputing, so Q42 round-trips them identically. --tol 0 still
+  passes. So the new rectangularity check will NOT block Task 13's real tilt measurement,
+  which was the failure mode worse than the one being fixed.
+Task 12: complete (commits 1acfd89..e6dc84a, review APPROVED after one fix round)
+Task 12: FOR TASK 13, from the re-review: the version-gate invariant lives in the CALLER,
+  not in gz_client_reconnect, which is what clears have_status, so ANY calibration loop
+  that reconnects on GZ_CLIENT_TIMEOUT repeats the same bug, and cal replies are decoded by
+  shape too, so re-gate there yourself. Build any set_display_area_corners (0x04) payload
+  with gz_rect_to_corners, because a quad that is not setDisplayArea's form is now refused
+  at 1.0 mm, which is correct but new. gz_display_read returns -1 for BOTH "did not parse"
+  and "reconnected daemon refused", so test != 0 rather than the value. The library caveat
+  says "the config" without naming a file; only the CLI prints config: <path>.
