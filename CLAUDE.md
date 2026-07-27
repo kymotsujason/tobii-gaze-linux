@@ -136,10 +136,15 @@ as the output's `PT_INTERP` and that loader does not search `/usr/lib`:
 
 - `skin/` is 140 files of third-party osu! art and audio, deliberately untracked and
   gitignored. It was only ever reference material for the hue palette.
-- The device stores its display area and keeps it across sessions. It currently holds a
-  **1500x1000 mm placeholder**, and correct geometry must be set before calibration
-  because calibration is computed in that frame. `isReset()` only fires below 50 mm, so a
-  wrong-but-plausible geometry is otherwise unfixable, which is what `--force-display-area`
-  is for.
+- The device stores its display area and keeps it across sessions. It now holds the real
+  **597 x 336 mm**, written during Task 5, reading back as `TL=(-299,346,0)
+  TR=(299,346,0) BL=(-299,10,0)`. Only `w_mm` and `h_mm` are measured; `z_mm`, `tilt`,
+  `cx` and `cy` in `~/.config/tobii.json` are still the daemon's template defaults, and
+  Task 13 must measure them before calibration is trusted, because calibration is computed
+  in that frame. `isReset()` only fires below 50 mm, so a wrong-but-plausible geometry is
+  otherwise unfixable, which is what `--force-display-area` is for.
+- **The daemon never emits a `display_area` (0x03) frame.** A `get_display_area` reply
+  comes back as a `response` (0x02) with `cmd_type` 0x02 and a 164-byte raw TTP body, not
+  as doubles. Confirmed live in Task 10. The plan says otherwise and the plan is wrong.
 - `.superpowers/` is gitignored, so anything written there is not in git. Durable notes
   belong in `docs/`.
