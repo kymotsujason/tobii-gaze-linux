@@ -23,10 +23,14 @@ killed=0
 documented=0
 unexpected=0
 
+# Which suite the mutations below are judged against. Set once per section.
+TEST_MAIN="tests/test_proto.c"
+TEST_SRCS="src/proto.c"
+
 fresh_copy() {
     rm -rf "$WORK/m"; mkdir -p "$WORK/m/src" "$WORK/m/tests"
-    cp "$SRC/src/proto.c" "$SRC/src/proto.h" "$WORK/m/src/"
-    cp "$SRC/tests/test_proto.c" "$WORK/m/tests/"
+    cp "$SRC/src/proto.c" "$SRC/src/proto.h" "$SRC/src/client.c" "$SRC/src/client.h" "$WORK/m/src/"
+    cp "$SRC/tests/test_proto.c" "$SRC/tests/test_client.c" "$WORK/m/tests/"
 }
 
 apply_edit() {
@@ -45,7 +49,9 @@ PY
 
 judge() {
     name="$1"; allow_survive="$2"
-    if ! out=$($CC $CFLAGS -o "$WORK/m/t" "$WORK/m/tests/test_proto.c" "$WORK/m/src/proto.c" 2>&1); then
+    srcs=""
+    for s in $TEST_SRCS; do srcs="$srcs $WORK/m/$s"; done
+    if ! out=$($CC $CFLAGS -o "$WORK/m/t" "$WORK/m/$TEST_MAIN" $srcs 2>&1); then
         echo "  KILLED   $name  (compile-time)"
         killed=$((killed+1)); return
     fi
@@ -190,6 +196,132 @@ run_mutation2 "plen bound AND widening both removed" \
             "if (plen > 0xFFFFFFFEu) return GZ_ERR_DESYNC;" \
     proto.c "size_t total = (size_t)GZ_HEADER_SIZE + (size_t)plen;" \
             "size_t total = (size_t)(GZ_HEADER_SIZE + plen);"
+
+echo
+echo "== client mutations =="
+
+TEST_MAIN="tests/test_client.c"
+TEST_SRCS="src/client.c src/proto.c"
+
+run_mutation "subscribe never queued" client.c \
+    "    c->out_len = gz_encode_cmd(c->out, sizeof c->out, GZ_CMD_SUBSCRIBE, NULL, 0);" \
+    "    c->out_len = 0;"
+
+run_mutation "reconnect does not re-subscribe or reset state" client.c \
+    "    gz_client_init(c);
+    c->fd = fd;" \
+    "    c->fd = fd;"
+
+run_mutation "incomplete and desync conflated as r <= 0" client.c \
+    "        if (r == 0) break;                       /* incomplete: keep the bytes */" \
+    "        if (r <= 0) break;                       /* incomplete: keep the bytes */"
+
+run_mutation "a torn read treated as corruption" client.c \
+    "        if (r == 0) break;                       /* incomplete: keep the bytes */" \
+    "        if (r == 0) { desync = 1; break; }"
+
+run_mutation "desync not sticky" client.c \
+    "int gz_client_feed_at(struct gz_client *c, const unsigned char *b, size_t n, uint64_t now_ns) {
+    if (c->link_broken) return GZ_CLIENT_RECONNECT;" \
+    "int gz_client_feed_at(struct gz_client *c, const unsigned char *b, size_t n, uint64_t now_ns) {"
+
+run_mutation "response body copied from the wrong offset" client.c \
+    "            memcpy(c->resp, f.body, n);" "            memcpy(c->resp, c->in, n);"
+
+run_mutation "compaction skipped" client.c \
+    "        memmove(c->in, c->in + off, c->in_len - off);" "        ;"
+
+run_mutation "feed does not chunk into the accumulator" client.c \
+    "        if (take > space) take = space;" "        ;"
+
+run_mutation "gap detection runs before the first sample" client.c \
+    "                if (c->have_prev_counter) {" "                if (1) {"
+
+run_mutation "EOF is not a reconnect" client.c \
+    "            if (r == 0) {                        /* orderly shutdown by the daemon */
+                c->link_broken = 1;
+                return GZ_CLIENT_RECONNECT;
+            }" \
+    "            if (r == 0) {
+                break;
+            }"
+
+run_mutation "SIGPIPE not suppressed on a dead peer" client.c \
+    "        ssize_t w = send(c->fd, c->out + c->out_off, c->out_len - c->out_off, MSG_NOSIGNAL);" \
+    "        ssize_t w = send(c->fd, c->out + c->out_off, c->out_len - c->out_off, 0);"
+
+run_mutation "adopted fd left blocking" client.c \
+    "    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {" \
+    "    if (flags < 0 || fcntl(fd, F_SETFL, flags) < 0) {"
+
+run_mutation "connect closes an fd it did not open" client.c \
+    "    gz_client_init(c);
+
+    if (path == NULL) { errno = EINVAL; return -1; }" \
+    "    gz_client_close(c);
+    gz_client_init(c);
+
+    if (path == NULL) { errno = EINVAL; return -1; }"
+
+run_mutation "overlong socket path truncated instead of refused" client.c \
+    "    if (len == 0 || len >= sizeof a.sun_path) {" "    if (len == 0 || len >= sizeof a.sun_path + 512) {"
+
+run_mutation "socket path spelled differently from the daemon" client.c \
+    "\"%s/tobiifreed/gaze.sock\"" "\"%s/tobiifreed/gaze.socket\""
+
+run_mutation "socket path truncation not detected" client.c \
+    "    if (n < 0 || (size_t)n >= cap) return -1;" "    if (n < 0) return -1;"
+
+# Expected to survive: gz_client_flush and gz_client_send both perform the same
+# reset before they touch the queue, so no caller can observe the difference.
+# Kept because the postcondition is worth stating where the bytes leave.
+run_mutation "outbound queue never resets (unreachable)" client.c \
+    "    if (c->out_off == c->out_len) { c->out_off = 0; c->out_len = 0; }" "    ;" ALLOW_SURVIVE
+
+run_mutation "protocol version mismatch ignored" client.c \
+    "                c->version_mismatch = (st.protocol_version != GZ_PROTOCOL_VERSION);" \
+    "                c->version_mismatch = 0;"
+
+run_mutation "err frame does not end a request" client.c \
+    "        if (c->have_error) return GZ_CLIENT_REMOTE;" "        ;"
+
+run_mutation "any response accepted as the answer" client.c \
+    "            if (c->resp_cmd == cmd) return 0;" "            return 0;"
+
+run_mutation "returning device does not re-arm the watchdog" client.c \
+    "                if (st.device_present && was_absent) c->last_gaze_ns = now_ns;" "                ;"
+
+run_mutation "every status re-arms the watchdog" client.c \
+    "                if (st.device_present && was_absent) c->last_gaze_ns = now_ns;" \
+    "                c->last_gaze_ns = now_ns;"
+
+run_mutation "watchdog window doubled" client.h \
+    "#define GZ_WATCHDOG_NS 1000000000ULL" "#define GZ_WATCHDOG_NS 2000000000ULL"
+
+run_mutation "watchdog wraps on a backwards clock" client.c \
+    "    if (now_ns <= c->last_gaze_ns) return GZ_LINK_OK;" "    ;"
+
+run_mutation "absent device reported as a broken link" client.c \
+    "    if (c->have_status && !c->status.device_present) return GZ_LINK_STALE;" "    ;"
+
+run_mutation "stale and present inverted" client.c \
+    "    if (c->have_status && !c->status.device_present) return GZ_LINK_STALE;" \
+    "    if (c->have_status && c->status.device_present) return GZ_LINK_STALE;"
+
+# The brief's own wording: "1 s with no valid gaze frame". The device streams
+# at 33.2 Hz whether or not it sees eyes, so arming on validity reconnects
+# every time the user looks away, and the reconnect does not help.
+run_mutation2 "watchdog armed by valid gaze only" \
+    client.c "                c->last_gaze_ns = now_ns;" \
+             "                ;" \
+    client.c "                if (gz_sample_any_eye_valid(&s)) c->last_valid_gaze_ns = now_ns;" \
+             "                if (gz_sample_any_eye_valid(&s)) { c->last_valid_gaze_ns = now_ns; c->last_gaze_ns = now_ns; }"
+
+# Expected to survive: proto.c caps a response payload at GZ_MAX_PAYLOAD and
+# strips the cmd_type byte, so body_len can never exceed sizeof c->resp. Kept
+# to document that the clamp is defence in depth rather than live logic.
+run_mutation "response length clamp removed (unreachable)" client.c \
+    "            if (n > sizeof c->resp) n = sizeof c->resp;" "            ;" ALLOW_SURVIVE
 
 echo
 echo "killed=$killed  documented_survivors=$documented  unexpected_survivors=$unexpected"
