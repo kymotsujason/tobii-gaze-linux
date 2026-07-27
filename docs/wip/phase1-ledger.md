@@ -1486,3 +1486,30 @@ TAPE MEASUREMENT, 2026-07-27. Device over 12 s, 376/380 valid frames:
   picture bottom. They disagree by ~104 mm. I flagged the device's low y as odd early in the
   session, so the tape may be the correct one here, but the anchor could have been the
   chassis rather than the lit picture.
+TAPE CLARIFIED, 2026-07-27, and it points at a FRAME ROTATION.
+  c IS DISCARDED: the human measured "from the right side to the middle of the monitor",
+  which is half the screen width (295.2, reported 280), not their eye's offset. Horizontal
+  eye position remains unmeasured, but the device says x +18.4 and both dot columns resolve,
+  so treat them as near centred.
+  b IS REAL: the human confirms their eye is level with practically the very centre of the
+  monitor, and half the picture height is 166.9 against their 170. So y_true = 170 + 5 = 175.
+  With a = 400 to the glass and the glass at z = -7.5, z_true = 392.5.
+  THE COMPARISON THAT MATTERS:
+    true   (y 175.0, z 392.5)   magnitude 429.75   angle from z axis 24.03 deg
+    device (y  70.6, z 429.1)   magnitude 434.87   angle from z axis  9.34 deg
+    magnitude ratio 1.0119, angle difference 14.69 deg
+  THE MAGNITUDE IS PRESERVED TO 1.2 PERCENT WHILE THE ANGLE MOVES 14.7 DEGREES. That is a
+  ROTATION about x, not a position error. The device's coordinate frame appears pitched
+  about 15 degrees relative to the frame we assumed.
+A WRONG PREMISE OF MINE HAS BEEN LOAD-BEARING SINCE THE MOUNTING DISCUSSION. I argued that
+  because the tracker is bonded flat to the bezel it tilts WITH the monitor, so the screen's
+  tilt in tracker space is 0 however the stand is angled, and I called it "correct by
+  construction rather than luck". That assumed the ET5's internal coordinate frame is
+  PARALLEL TO ITS MOUNTING FACE. If the device is pitched up internally, which is how these
+  are built so the cameras see a face rather than a chest, the screen genuinely IS tilted in
+  the tracker's frame and tilt = 0 is wrong. Every sweep in the log ran with tilt = 0.
+  This is the second premise I supplied confidently and had to retract today, after the
+  three-sweep model A conclusion. Both were reasoned rather than measured.
+  CAUTION, not yet resolved: a tilted screen plane produces a KEYSTONE, which is
+  anisotropic, but measured isotropy is 0.9991. So a frame pitch may explain the vertical
+  offset without explaining the 1.18 isotropic gain. Sent to the investigator to separate.
