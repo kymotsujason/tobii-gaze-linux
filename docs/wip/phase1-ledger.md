@@ -578,3 +578,79 @@ Task 8: still open, recorded not fixed: bootloader PID 2104:0102 re-enumeration 
   5 lines per flap.
 Task 8: complete (commits 7e64687..84fc228, review APPROVED after one Critical fixed,
   1 Critical + 1 Important resolved, physical replug outstanding on a hardware dependency)
+Task 9: review CHANGES REQUIRED, no Critical, two Important. Commit dfe0ae0, patches
+  0007 and 0008. Spec compliance MET on all five steps, all four carried items genuinely
+  done. Controller verified byte-identical reconstruction from the pin with all eight
+  patches before dispatching the review.
+  P9 RACE DEMONSTRATED, NOT ARGUED: 21 misrouted replies in 2000 before, 0 in 2000 after.
+  Slot-plus-generation keying judged SOUND rather than window-moving: the discriminator is
+  Client.gen drawn from Server.slot_gen[i], which lives OUTSIDE Client and outlives its
+  occupants, every access is under Server.lock, the counter skips 0 on wrap, and aliasing
+  would need 2^32 accepts on one slot while a stale ref survives. refForFd still looks up
+  by fd but runs on the main thread inside dispatchCmd, and the main thread is the only
+  thread that accepts, so no new client can inherit the fd during that window.
+  Server.sendToClient was DELETED outright, so no socket reply can be addressed by fd
+  number any more, which is stronger than a check.
+  The implementer disclosed that its default test mode never exercises the generation
+  check, because the hold counter keeps the slot occupied so B lands elsewhere, and added
+  a `sub` mode where a gaze broadcast to A's closed socket forces removeClient and frees
+  the slot. The guard then fired 7 times, always gen N vs N+1 on the same slot. The
+  reviewer called that out approvingly: the mechanism, not the aggregate.
+  HEAD-OF-LINE fix confirmed correct where the rejected design was not: dispatch is
+  independent of the read, a failed read only sets eof and the buffer drains on its own
+  terms, so the strand case cannot occur BY CONSTRUCTION. The zero-timeout condition
+  exists (pendingWorkLocked consulted under the lock in pollWait) and cannot livelock
+  because progress is guaranteed each pass. 15.12 s -> 0.50 s for the second client's
+  first reply, 500/500 both ways, strand 200/200.
+  BACKPRESSURE threshold derivation confirmed: 131072 / 397 = 330 frames / 33.2 Hz =
+  9.94 s. Wedged subscriber dropped at 10021 ms, idle unsubscribed survived 45 s.
+  WIRE FORMAT JUDGED SAFE TO FREEZE for the C client: [u8 0x04][u32 LE 3][u8 present]
+  [u8 cal][u8 version] is three uint8_t fields, no padding on any ABI, no endianness
+  question inside the payload, status is always the first frame on a fresh connection, and
+  it is delivered to unsubscribed clients too. ONE RULE FOR TASK 10: require
+  payload_len >= 3 and read the version at payload offset 2, which pins the only field a
+  future shape change must not move.
+Task 9: IMPORTANT 1, fix dispatched, and worse than the implementer's own concern said. A
+  hold that never resolves does not merely pin a slot, it SPINS THE MAIN LOOP AT 100% OF A
+  CORE. server.zig:268 refuses to reap an eof client while holds > 0, and pollWait
+  registers POLL.IN for every client including eof ones, so a closed socket is permanently
+  readable-at-EOF and poll returns immediately every iteration. Normally that window is one
+  USB round trip, about 30 ms. If the reply never arrives it is PERMANENT: readCommands
+  skips the read because eof is set, nothing dispatches, nothing reaps, and only failPending
+  or a restart clears it. Trigger: a short-lived CLI client sends add_calibration_point,
+  or any command the device declines to answer, then exits. This project exists to not
+  perturb a machine running osu! at 360 Hz, so a permanently hot core is the one cost it
+  cannot pay, and it is reachable from exactly the Task 12 and 13 tooling.
+Task 9: IMPORTANT 2, fix dispatched, and a tripwire working as designed. This task
+  introduced a CROSS-THREAD READ of `subscribed`, the one Client field deliberately left
+  outside the lock. flush now reads it at server.zig:342 and flush is reached from the USB
+  thread via sendToRef and setStatus, while dispatchCmd still writes it lock-free under the
+  comment I had Task 7 add, which asserts both reader and writer are the main thread. That
+  comment is now FALSE. The practical harm is one byte with no tearing on x86-64, but the
+  stale invariant is how the next lifetime bug gets written. The Task 7 tripwire is
+  precisely what made this detectable.
+Task 9: minor, and it is a NUMBER so it matters here: the implementer's "holds are bounded
+  at one per client by the progress gate" is NOT established. The gate proves the USB
+  thread completed a poll since the last resume, not that the previous request was
+  ANSWERED. A device that never answers accumulates one pending entry and one hold per
+  command up to MAX_PENDING. The core's own 32-entry eviction is a second generator of
+  permanently unresolved entries, so the two COMPOUND rather than being independent.
+Task 9: minor: stall_since_ms uses wall clock, so an NTP step can disconnect a healthy
+  subscriber early or postpone the timeout indefinitely.
+Task 9: minor: PATCH NAMES NOW MISDESCRIBE CONTENTS. 0008-pending-entry-lifetime carries
+  P8's emission, head-of-line blocking and backpressure, because path-based splitting could
+  not express the brief's split when both concerns cross both daemon files. The split
+  itself is sound: the dependency runs ONE WAY only (0008 needs STATUS_SIZE, encodeStatus
+  and pending_evictions from 0007, never the reverse), which matches filename order, so the
+  stack applies cleanly and 0008 is independently revertible while 0007 alone is not.
+  Rename dispatched, because "revert the status patch" would otherwise pick the wrong file.
+Task 9: minor for TASK 13: saveCalibration sets calibration_applied = true even on the
+  branch where the blob was too large to save for replay, so a later reconnect would
+  advertise cal=1 with nothing replayed. Unreachable today because calApply already refuses
+  anything past scratch_size() = 4096 = saved_cal.len, but Task 13 writes the real blobs.
+Task 9: MAX_CMDS_PER_PASS = 8 judged defensible and less arbitrary than the implementer
+  admitted. It does NOT protect the gaze ring, since forwardCommand drains the ring after
+  every single command, so ring overrun is bounded independently. What 8 buys is a fairness
+  bound of about 8 x 30 ms x (clients - 1) before another client's first reply, which
+  matches the measured 0.50 s for two clients almost exactly. No cliff on either side.
+  Honest framing: bounded by measurement, not derived from a rate.
