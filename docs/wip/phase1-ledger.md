@@ -532,3 +532,49 @@ Task 8: PHYSICAL TEST CHECKLIST produced for the user, 10 items, in section 8 of
   or "replaying display area after reconnect" decides whether the ET5 keeps geometry across
   a power cycle, and therefore whether the replay branch is dead code or the critical path.
   C1 must be fixed BEFORE that test or item 7 fails for an unrelated reason.
+Task 8: fix round 1/5 (6 addressed, 0 open; commits 0c151a5..84fc228). Re-review verdict
+  ALL FIXES ADDRESSED, no new breakage.
+  C1 fixed and PROVED THROUGH THE EXACT BRANCH, which is what makes this convincing: the
+  round-1 binary answered 0/70 commands after a reconnect with 6 "pending table full", and
+  the fixed build answers 70/70 twice with 0 overflows. set_hooks now sits after the whole
+  block containing BOTH queryDisplayArea call sites (tracker.zig:106 in Tracker.init and
+  :138 in setDisplayArea), and the re-reviewer confirmed nothing after it reaches either.
+  I1 fixed: a replay failure now tears down, keeps device_present false and retries, so
+  device_present.store(true) is unreachable except through failure == null. No spin,
+  because sleepUntilQuit(backoff_ms) is the first statement of the loop.
+  Log volume: 4 failure lines per 120 s outage and a hard ceiling of 60/hour, against 1800
+  before. Past 60 s the cap is 30 s and the log is gated by a timer rather than the attempt
+  count, so a long absence cannot regress to a flood.
+  Fix 5 chose COPYING the response into a 4096-byte buffer over stopping the drain, which
+  holds regardless of how many feed_usb_in calls follow. The over-length guard returns
+  without setting captured_len, so an oversized reply degrades to "no response" rather than
+  a partial decode. That matters because plen is device-controlled up to ACC_CAP = 2 MiB.
+  captured_payload is gone from the tree entirely.
+  Instrumentation is bounded: fires only on corners.isReset() using the identical @abs
+  formula as isReset itself, prints at most 128 bytes into a 256-byte buffer, and is
+  reachable at most twice per connect, never in the retry loop.
+Task 8: PATCH COMPLETENESS verified two independent ways after the implementer disclosed
+  that its first extraction produced 142 lines instead of 382. Controller: git archive of
+  the pin, apply all six patches, diff -r against vendor/tobiifree = BYTE IDENTICAL.
+  Re-reviewer, by content rather than line count: 0004 still carries round-1's RecvResult
+  union, bytesOf and the fatal field, and 0005 still carries GAZE_RING_SIZE = 256 and
+  fn pollWait, none of which appear in this round's delta. No cross-leak between the two
+  extraction paths.
+  ROOT CAUSE PROPAGATED TO CLAUDE.md: build.sh ends with `git add -A`, so a plain
+  `git diff` on a SECOND round against the same patch yields only the new delta. Amend with
+  `git diff HEAD`, or `git diff HEAD -- <paths>` when a task splits patches by path. This
+  trap has now nearly shipped broken patches twice, at 14 lines instead of 24 and 142
+  instead of 382.
+Task 8: physical checklist corrected by the re-review and written to
+  docs/physical-test-checklist.md, which is TRACKED, unlike the verdict file it came from.
+  Log strings changed with Fix 3, so items 2, 3, 4, 7 and 8 were reworded, and the item 3
+  threshold dropped from "above about 40 lines" to "above about 5".
+Task 8: CARRY TO TASK 9, from the re-review: when applySavedCalibration is filled in, note
+  it runs AFTER set_hooks. caResponseHook save/restores hook_response
+  (tobiifree_core.zig:2026,2067) so cal_apply itself is safe, but any NEW helper that calls
+  set_hooks directly is not.
+Task 8: still open, recorded not fixed: bootloader PID 2104:0102 re-enumeration is
+  unhandled, and reconnect() has no cross-event rate limit so a flapping cable emits about
+  5 lines per flap.
+Task 8: complete (commits 7e64687..84fc228, review APPROVED after one Critical fixed,
+  1 Critical + 1 Important resolved, physical replug outstanding on a hardware dependency)
