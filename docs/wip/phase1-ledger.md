@@ -1376,3 +1376,50 @@ collapses, calibration does take effect and the residual is geometric.
 CONTROLLER NOTE: A vs B is also informative. B restarted the daemon so its replay buffer
 was empty and calibration_applied went to 0, yet B measured BETTER than A. The device
 behaves identically whether the daemon believes it is calibrated or not.
+CALIBRATION INVESTIGATION, 2026-07-27. Three of five hypotheses KILLED BY DIRECT
+MEASUREMENT from a 241-frame live capture, not by reasoning.
+  My arithmetic verified and slightly corrected: after-cal slope x 1.1642, y 1.1652,
+  isotropy 0.9991, and a proper least-squares puts the vertical offset at 216 px, not the
+  203 I estimated from row means.
+  THE DECISIVE FACT I HAD MISSED: the SAME 1.16 scale is present in the UNCALIBRATED runs
+  (1.1776 and 1.1606). The error PREDATES calibration entirely, so calibration was never
+  the thing to fix.
+  H3 DEAD, and this was my most promising hypothesis: over 425 eye-frames
+  gaze_point_2d_norm equals (hit_3d - our rect)/our size to within 7.5e-05, and the hit z
+  is exactly -7.5 every frame. The device uses OUR display area, correctly, and no other
+  reference frame exists.
+  H2 DEAD: only eye ORIGINS have a raw/calibrated pair; there is no pre-calibration 2D
+  field that could be surfaced by mistake.
+  H1 DEAD: calibrated and raw eye origins differ by 4.600 mm EVERY frame and
+  corr(dy, gaze_ny) = -0.992, so the onboard model is live and gaze-dependent. It is not a
+  no-op, it is an order of magnitude too weak: 4.6 mm of ray-origin correction moves the
+  screen hit 2-3 mm against a 45 mm error. That matches the vendored comment promising only
+  a 1-5 mm correction.
+  ALSO RULED OUT: tilt (isotropy 0.9991 means the error is isotropic, so no tilt term),
+  wrong monitor size, and the 4x4 mm journal readings (a fire-and-forget readback race; the
+  device reads back correct now and there has been no reconnect since).
+TWO MODELS SURVIVE and the existing data cannot separate them, because every sweep sat
+  between 586 and 620 mm where they agree to 0.1 percent.
+  A, DISPLAY GEOMETRY: the plane depth is wrong, implying z_true about +80 mm consistently
+    across all five runs, plus cy about 27 mm high. Both are unmeasured template defaults,
+    which is exactly what `gaze-cal display` warns about on every success. AGAINST IT: 86 mm
+    is a large recess for a tracker bonded to a bezel.
+  B, DEVICE EYE MODEL: about 16.6 percent angular gain plus about 4.4 degrees of vertical
+    bias, which this calibration cannot correct.
+  DISCRIMINATING EXPERIMENT relayed to the user, 30 seconds, changes nothing on the device:
+  one accuracy sweep at 45-50 cm instead of 60. Take mean gaze x of the right three points
+  minus the left three. At 60 cm it is 2384 px. Near 2390 means distance-invariant, so B.
+  Near 2470-2530 means it grew with proximity, so A. Run-to-run slope noise is 0.0058,
+  making this roughly 10 sigma at 470 mm, with no ambiguous middle.
+SPEC SECTION 13 ITEM 2 IS NOT ANSWERABLE AS POSED, confirmed independently: calibration's
+  effect on ACCURACY is below run-to-run noise, so the persistence of that effect cannot be
+  measured. It BECOMES answerable through the raw-to-calibrated eye-origin delta
+  (dz = -4.242 mm, sd 0.14 over 222 frames), which needs ten seconds of a face and no
+  aiming at all. Caveat: there is no cal_clear in the protocol, so proving the delta is OURS
+  requires the differential form, namely recalibrate for a different blob, record the delta,
+  power cycle, record again.
+SIDE FINDING CHECKED AND CLEARED BY CONTROLLER: the investigator flagged that every sweep
+  ran on DP-2 rather than the DP-1-2 CLAUDE.md used to name, and wondered whether the
+  tracker sits on a different panel than the dots. It does not: the user stated the tracker
+  is bonded to the AW2725DF, and DP-2 IS the AW2725DF by EDID. Dots and tracker are on the
+  same panel.
