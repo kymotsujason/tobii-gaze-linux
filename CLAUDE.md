@@ -25,8 +25,14 @@ measurements.
 
 - Tobii Eye Tracker 5, USB `2104:0313` (runtime) / `2104:0102` (bootloader). No official
   Linux driver.
-- Gameplay monitor DP-1-2: 2560x1440 at 360 Hz, 597 x 336 mm, X11 offset +4000+0,
-  45 px per degree at 60 cm.
+- Gameplay monitor is **DP-2**, an Alienware AW2725DF, and it is the X11 primary.
+  2560x1440 at 360 Hz, X11 offset **+4000+1440**, active area **590.42 x 333.72 mm** from
+  Dell's spec sheet. The old entry here said `DP-1-2`, `+4000+0` and `597 x 336 mm`, and
+  all three were wrong. 597 x 336 was never measured: it is the plan's own example value,
+  written in the Task 3 config snippet as `"w_mm": 597.0, # MEASURE YOURS`, and it
+  propagated into this file as though it were a measurement. It is a true-27-inch figure;
+  this panel is 26.7 inches viewable. EDID reports 590 x 330 because EDID stores whole
+  centimetres, so trust the spec sheet over both.
 - osu! under Wine, borderless 2560x1440, `FrameSync = Unlimited`, 240 fps cap.
 - OBS 32.1.2. Canvas 2560x1440, output 1920x1080 bicubic, 60 fps, x264 6000 kbps, NV12,
   BT.709 limited. Capture is `xcomposite_input`.

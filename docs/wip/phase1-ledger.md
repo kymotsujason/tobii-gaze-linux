@@ -1171,3 +1171,27 @@ Z_MM IS UNRESOLVED AND DELIBERATELY LEFT AT 0. The tracker protrudes about 7.5 m
 NOTE for anyone reading gaze-cal monitor output: `valid=` is gz_sample_any_eye_valid(), a
   BOOLEAN, so valid=0 means no eye detected. That is NOT an inversion of the protocol's
   "validity == 0 means VALID"; the two just read confusingly side by side.
+DISPLAY AREA WAS WRONG ALL ALONG, caught immediately before calibration. This is the worst
+  provenance failure in the project, because it is the single most load-bearing number in
+  the calibration chain and it was recorded in CLAUDE.md as a measured fact.
+  CLAUDE.md said the gameplay monitor was "DP-1-2: 2560x1440 at 360 Hz, 597 x 336 mm, X11
+  offset +4000+0". THREE of those are wrong. xrandr and the EDID show the monitor is DP-2,
+  an Alienware AW2725DF, the X11 PRIMARY, at offset +4000+1440.
+  THE SMOKING GUN: the plan's own Task 3 snippet writes the figure as
+    "w_mm": 597.0,     # DP-1-2 active area width, MEASURE YOURS
+  so 597 x 336 was the plan author's EXAMPLE, never a measurement, and it propagated into
+  CLAUDE.md as fact and from there into the device. 597 x 336 is a true-27-inch active
+  area; the AW2725DF is 26.7 inches viewable.
+  USER SUPPLIED THE REAL FIGURE from the manufacturer spec: 590.42 x 333.72 mm. EDID's
+  590 x 330 was itself misleading, because EDID stores whole centimetres so 333.72
+  truncates to 33 cm; the spec sheet beats both.
+  ERROR CORRECTED: 6.58 mm wide (1.1%) and 2.28 mm tall (0.68%). Unlike the z offset, a
+  width error is NOT absorbed by a nine-point fit: it scales the whole mapping and pushes
+  gaze systematically outward or inward toward the screen edges. Calibrating first would
+  have baked it in permanently.
+  APPLIED AND VERIFIED through the gate, which reads the DEVICE rather than the daemon
+  cache: device 590.4 x 333.7 mm, origin (-295.2, 5.0), corners TL=(-295.2,338.7,0)
+  TR=(295.2,338.7,0) BL=(-295.2,5.0,0).
+  THE OFFSET ERROR WOULD HAVE BITTEN IMMEDIATELY TOO: the calibration stimulus window is
+  positioned from the X11 offset, and the brief hardcodes +4000+0, so every dot would have
+  been drawn 1440 pixels above where the user was looking.
