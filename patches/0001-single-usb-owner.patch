@@ -1,0 +1,147 @@
+diff --git a/applications/tobiifreed/src/main.zig b/applications/tobiifreed/src/main.zig
+index 571cd1f..504e01b 100644
+--- a/applications/tobiifreed/src/main.zig
++++ b/applications/tobiifreed/src/main.zig
+@@ -33,6 +33,22 @@ var server: Server = undefined;
+ var ws: ?WsServer = null;
+ var quit: bool = false;
+ 
++// The USB thread owns the bulk endpoint and the core parser state. Client
++// commands run on the main thread and touch the same globals: request_* writes
++// session_out and the core's seq->request_id table, transport.send drives the
++// OUT endpoint, and the calibration state machines call drainReads, which is a
++// second reader of the IN endpoint feeding the same accumulator. So the main
++// thread parks the USB thread for the whole command instead of sharing.
++var usb_pause_req: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
++var usb_paused: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
++// Bumped by the USB thread after every completed poll. usbPause uses it to
++// prove the thread got a turn since the last resume; see usbPause.
++var usb_polls: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
++var usb_polls_at_resume: u32 = 0; // main thread only
++// Cleared when the USB thread leaves its loop, so a shutdown with commands
++// still queued does not wait on a thread that is never coming back.
++var usb_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true);
++
+ // ── Gaze ring buffer: USB thread → main thread ─────────────────────
+ //
+ // The USB thread calls onGaze which stores samples in a ring buffer.
+@@ -164,8 +180,17 @@ fn forwardCommand(client_fd: std.posix.fd_t, cmd_type: u8, payload: []const u8,
+         return;
+     };
+ 
++    // Pausing around only the state machines is not enough: the request/response
++    // commands mutate the same core session state and the same USB endpoint.
+     switch (cmd) {
+         .subscribe, .disconnect => return, // handled locally, not forwarded
++        else => {},
++    }
++    usbPause();
++    defer usbResume();
++
++    switch (cmd) {
++        .subscribe, .disconnect => return, // unreachable, filtered above
+ 
+         // State machine commands — driven synchronously, response sent when done.
+         .start_calibration => {
+@@ -199,17 +224,21 @@ fn forwardCommand(client_fd: std.posix.fd_t, cmd_type: u8, payload: []const u8,
+                 return;
+             };
+             const out_len = core.session_out_len_();
+-            if (out_len > 0) {
+-                if (transport.send(core.session_out_ptr()[0..out_len])) {
+-                    if (request_id != 0) {
+-                        addPending(request_id, client_fd, cmd_type, is_ws);
+-                        log.debug("forwarded cmd=0x{x:0>2} request_id={} for fd={}", .{ cmd_type, request_id, client_fd });
+-                    } else {
+-                        log.debug("sent fire-and-forget cmd=0x{x:0>2} for fd={}", .{ cmd_type, client_fd });
+-                    }
++            if (out_len == 0) return;
++            // Route first, send second. Once the bytes are on the wire the reply
++            // can be consumed at any moment, and a reply with no pending entry is
++            // dropped with only a debug line. The entry is removed again if the
++            // send fails, so a failed send does not leak a slot.
++            if (request_id != 0) addPending(request_id, client_fd, cmd_type, is_ws);
++            if (transport.send(core.session_out_ptr()[0..out_len])) {
++                if (request_id != 0) {
++                    log.debug("forwarded cmd=0x{x:0>2} request_id={} for fd={}", .{ cmd_type, request_id, client_fd });
+                 } else {
+-                    log.err("USB send failed for cmd=0x{x:0>2}", .{cmd_type});
++                    log.debug("sent fire-and-forget cmd=0x{x:0>2} for fd={}", .{ cmd_type, client_fd });
+                 }
++            } else {
++                log.err("USB send failed for cmd=0x{x:0>2}", .{cmd_type});
++                if (request_id != 0) _ = takePending(request_id);
+             }
+         },
+     }
+@@ -589,12 +618,70 @@ fn parseIpv4(s: []const u8) ?u32 {
+ 
+ fn usbThreadFn() void {
+     log.info("USB thread started", .{});
++    defer usb_running.store(false, .release);
+     while (!quit) {
++        if (usb_pause_req.load(.acquire)) {
++            usb_paused.store(true, .release);
++            while (usb_pause_req.load(.acquire) and !quit) std.Thread.sleep(200_000); // 0.2ms
++            usb_paused.store(false, .release);
++            continue;
++        }
+         tracker.poll();
++        _ = usb_polls.fetchAdd(1, .release);
+     }
+     log.info("USB thread stopped", .{});
+ }
+ 
++/// Park the USB thread and wait for it to acknowledge. Only the main thread
++/// calls this, so the handshake needs no reentrancy.
++///
++/// The first loop is what makes back-to-back commands survivable. usbResume
++/// only clears the request flag, so a command issued within the USB thread's
++/// 0.2ms parking sleep finds usb_paused still set from the previous pause,
++/// takes that stale ack, and re-parks the thread before it ever reached
++/// tracker.poll(). The USB thread is the only reader of the IN endpoint, so a
++/// pipelined client starves it completely and every response goes unread until
++/// the routing table overflows. Measured: 4000 pipelined get_display_area
++/// yielded 0 routed responses and 3935 "pending table full" warnings. Waiting
++/// for a poll to complete since the last resume both guarantees the reader a
++/// turn and guarantees usb_paused was cleared, so the ack below is fresh.
++///
++/// Each wait is budgeted at 5000 x 0.2ms = 1s, against a worst-case poll() of
++/// ~101ms (a 100ms blocking recv, then a 1ms tryRecv that finds nothing and
++/// ends the drain loop), so exhausting a budget means the USB thread is wedged,
++/// not merely busy. Exhausting one is not fatal: the command proceeds
++/// unsynchronised, which is exactly the pre-patch behaviour, and usbResume
++/// still clears the flag. Nothing the USB thread does waits on the main thread,
++/// so there is no cycle to deadlock on.
++///
++/// Both loops also abandon the wait once the USB thread has exited. On SIGTERM
++/// that thread leaves first while the main thread is still draining a queued
++/// command batch, and without the usb_running test each of those commands burns
++/// both budgets: 300 queued commands turned a shutdown into ten minutes.
++fn usbPause() void {
++    var waits: u32 = 0;
++    while (usb_running.load(.acquire) and
++        usb_polls.load(.acquire) == usb_polls_at_resume and waits < 5000) : (waits += 1)
++    {
++        std.Thread.sleep(200_000);
++    }
++    if (waits >= 5000) log.err("USB thread made no progress since last resume", .{});
++
++    usb_pause_req.store(true, .release);
++    var spins: u32 = 0;
++    while (usb_running.load(.acquire) and
++        !usb_paused.load(.acquire) and spins < 5000) : (spins += 1)
++    {
++        std.Thread.sleep(200_000);
++    }
++    if (spins >= 5000) log.err("USB thread failed to pause", .{});
++}
++
++fn usbResume() void {
++    usb_polls_at_resume = usb_polls.load(.acquire);
++    usb_pause_req.store(false, .release);
++}
++
+ // ── Transport bridge ────────────────────────────────────────────────
+ 
+ fn transportSend(data: []const u8) bool {
