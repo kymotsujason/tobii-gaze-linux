@@ -850,3 +850,53 @@ Task 11: nine deviations from the brief, the load-bearing ones being out[4096] i
   said "valid gaze", which would reconnect whenever the user merely LOOKED AWAY; no
   MSG_NOSIGNAL, so a dead daemon would SIGPIPE OBS; and _POSIX_C_SOURCE is required or the
   brief's own build command fails under -Werror.
+Task 11: review CHANGES REQUIRED, no Critical, two Important. Spec MET on all five steps,
+  all nine deviations verified as load-bearing or correct.
+  LATENCY DISCREPANCY RESOLVED BY MEASURING BOTH WAYS, and both prior numbers were right.
+  Isolated commands 200 ms apart: min 1.30, p50 1.55, p90 11.46, max 11.51 ms. Back to
+  back: min 29.95, p50 30.24, max 30.37 ms, which is exactly one 30.1 ms gaze interframe.
+  MECHANISM: usbPause gates on usb_polls == usb_polls_at_resume, so a command costs a full
+  USB poll cycle ONLY when no poll completed since the previous command's resume, which is
+  precisely the back-to-back case. Tasks 6 and 9 measured BATCHES, Task 11 measured
+  ISOLATED commands. Nothing changed and neither is wrong.
+  TRUE SHAPE, for all later tasks: ~30 ms per command inside a batch, ~2 ms isolated,
+  ~100 ms worst case when the device is silent.
+  DOWNSTREAM UNCHANGED: the 5 s eof-hold derivation (8 x 30 ms x 15 = 3600 ms) describes
+  BATCH traffic, so 30 ms was the right input and the budget stands. Task 13's stimulus
+  points are settle-separated hence isolated (~2 ms), and its start/finish/apply are
+  back-to-back (~30 ms each); both are negligible against a 1200 ms settle.
+Task 11: claim (a) CONFIRMED. Cmd.disconnect (0xFF) IS a no-op: server.zig:357-359 returns
+  without closing, and the reviewer measured 166 gaze frames in 5.0 s after sending it with
+  no EOF. ONLY close() ends a session. Any client that disconnects politely and waits will
+  hang.
+Task 11: claim (b) CONFIRMED but its COROLLARY REFUTED, which is the more useful half.
+  frame_counter survives not just USB re-enumeration but a full daemon kill of 15 s and
+  restart: 530932 -> 531802, monotonic, no reset. So client.h's comment claiming
+  "frame_counter restarts with the daemon, so carrying these across a reconnect reports a
+  fabricated billion-sample drop" is FALSE, a provenance defect of exactly the class this
+  project tracks. The reset code is CORRECT and LOAD-BEARING, but for the OPPOSITE reason:
+  the counter keeps advancing while the client is away, so carrying prev_counter charges
+  every missed sample to dropped. The reviewer's own reconnect gap was 870 counts = 217
+  samples that would have been reported as drops. Right code, wrong reason, and the wrong
+  reason is what a future reader would act on.
+Task 11: IMPORTANT 1, fix dispatched: gz_client_adopt LEAKS the fd it owns when the initial
+  flush fails, returning -1 with c->fd still set, violating its own documented contract.
+  Reproduced. Reachable via server.zig:211-213, which accepts then immediately closes
+  client 17, so connect() succeeds and the subscribe send takes EPIPE. main.c retries every
+  250 ms, leaking one descriptor per attempt, and in Plan 2 that loop lives inside OBS.
+Task 11: IMPORTANT 2, fix dispatched: the 1 s watchdog is COUPLED TO THE DAEMON'S USB
+  PAUSE. Every forwarded command parks the USB thread, so gaze production stops for its
+  duration, and any command or batch parking it past 1 s fires a DIFFERENT subscribed
+  client's watchdog, where reconnecting cannot help. The daemon's own eof-hold budgets
+  3.6 s of exactly this. Concrete case: TASK 13 CALIBRATING WHILE A PLAN 2 OVERLAY IS
+  SUBSCRIBED. Task 13 must report the park time of each calibration command; that is the
+  cheap falsifier for the constant, far cheaper than osu! load.
+Task 11: minor for Tasks 12 and 13: after a GZ_CLIENT_TIMEOUT the two sides ARE out of
+  step, and a late err frame is misattributed to the next command because err frames carry
+  no cmd_type. Responses get re-correlated by cmd_type and counted in resp_mismatch; errs
+  have no equivalent. A timeout must be treated as a RECONNECT, not as "send the next one".
+Task 11: for Tasks 12 and 13, from the reviewer: use gz_client_request, one command at a
+  time; c->version_mismatch is recorded and never acted on, so the gate belongs in Task 12;
+  the get_display_area reply is 164 body bytes and is NOT doubles at offset 0, confirmed
+  again by a naive decode printing garbage, so the Q42 TLV reader is mandatory; and
+  `dropped` is per-connection by design, so never compare it across a reconnect.
