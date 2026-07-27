@@ -1138,3 +1138,36 @@ NEW DEFECT FOUND BY THE SAME LOG: setDisplayArea's own readback RACES THE WRITE.
   said 4x4. Task 13 must allow settle time after any --force-display-area before gating.
 CLAUDE.md corrected on both counts: geometry survives daemon restarts and USB
   re-enumeration but NOT power cycles, and the post-write readback is unreliable.
+MOUNTING GEOMETRY, user-measured 2026-07-27. The ET5 is stuck flat to the bottom bezel of
+  an AW2725DF, centred, with its TOP edge flush to the bottom of the visible image and the
+  device about 10 mm tall, so its optical centre sits 5 mm below the image.
+  RESOLVED BY THE MOUNTING ITSELF, not by measurement, and this is the useful part: because
+  the tracker is RIGIDLY BONDED to the bezel it tilts WITH the monitor, and `tilt` describes
+  the screen's orientation in the TRACKER's frame, not the world's. Rotating the assembly
+  moves both together, so the relative tilt is zero however the stand is angled.
+    cx   = "c"  centred          CORRECT AS WAS
+    tilt = 0    coplanar         CORRECT AS WAS, and by construction rather than luck
+    cy   = "b - 5"               CHANGED from "b - 10", applied and verified
+  APPLIED AND VERIFIED: stopped the unit, ran --force-display-area, restarted the unit, and
+  confirmed through gaze-cal (which reads the DEVICE, not the daemon's cache):
+  device 597.0 x 336.0 origin=(-298.5, 5.0), corners TL=(-298.5,341,0) BL=(-298.5,5,0).
+Z_MM IS UNRESOLVED AND DELIBERATELY LEFT AT 0. The tracker protrudes about 7.5 mm in front
+  of the screen surface, so the MAGNITUDE is 7.5. The SIGN is not determinable from any
+  source in this project: neither the spec, nor ARCHITECTURE.md, nor the vendor SDK
+  documents the z-axis direction. The two candidates are Tobii's published UCS, where +z
+  points toward the user and the screen would be at -7.5, and the only convention statement
+  recorded in this project (Task 12's reviewer inferring "negative tilt = top edge toward
+  the user"), which combined with tl_z = bl_z + h*sin(t) implies +z points away from the
+  user and the screen is at +7.5.
+  LEFT AT 0 ON PURPOSE: 0 sits exactly between the two candidates, so it is wrong by 7.5
+  either way, whereas guessing the sign is wrong by 15 half the time.
+  THERE IS A DEFINITIVE 10-SECOND TEST, and Task 13 must run it FIRST: GazeSample carries
+  eye_origin_L_mm[3], the calibrated eye position in tracker space in mm with the origin at
+  the IR sensor array. With the user seated at a normal distance the z component reads
+  about +600 or about -600, which settles the sign outright. gaze-cal monitor does not
+  currently print it; Task 13 needs to read gaze anyway, so it should print it once.
+  NOT BLOCKING: at a 600 mm working distance a 15 mm depth error is about 1.4% of range,
+  and a nine-point calibration absorbs a smooth systematic of that size.
+NOTE for anyone reading gaze-cal monitor output: `valid=` is gz_sample_any_eye_valid(), a
+  BOOLEAN, so valid=0 means no eye detected. That is NOT an inversion of the protocol's
+  "validity == 0 means VALID"; the two just read confusingly side by side.
