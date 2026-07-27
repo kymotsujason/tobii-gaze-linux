@@ -280,7 +280,8 @@ static void test_reconnect_resets_gap_detection(void) {
      * for the opposite reason, which is that the counter keeps advancing while
      * the client is away, so carrying prev_counter charges the whole absence
      * to dropped. The numbers below are that measured reconnect: an 870-count
-     * gap, which is 217 samples that would otherwise be reported as lost. */
+     * gap, which gz_frames_dropped scores as 216 samples lost. 216 and not
+     * 217, because 870 is not a multiple of 4 and the division truncates. */
     int sv[2], sv2[2];
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
     struct gz_client c;
@@ -303,8 +304,14 @@ static void test_reconnect_resets_gap_detection(void) {
     struct gz_gaze_sample b = mk_sample(531802, 0, 0);
     n = put_gaze(buf, &b);
     assert(gz_client_feed(&c, buf, n) == 1);
-    assert(c.dropped == 0);          /* not 217 */
+    assert(c.dropped == 0);          /* not 216 */
     assert(c.gaze_frames == 1);      /* per-connection, reset with the rest */
+
+    /* Pin what the reset is avoiding, and pin the arithmetic while here: the
+     * gap is 870, which is not a multiple of 4, so the phase shifted and the
+     * truncating division scores 216 rather than 217. */
+    assert((531802u - 530932u) % GZ_FRAME_COUNTER_STEP != 0);
+    assert(gz_frames_dropped(530932u, 531802u) == 216);
 
     /* The same reset also covers a counter that did go backwards, which is not
      * observed today but would report a quarter-billion drops if it happened. */
@@ -483,6 +490,29 @@ static void test_request_ignores_a_reply_to_another_command(void) {
 
     gz_client_close(&c);
     close(sv[1]);
+}
+
+static void test_adopt_rejects_a_bad_fd_without_keeping_it(void) {
+    /* The same "-1 leaves fd at -1" contract, one seam over. Without the init
+     * this arm leaves whatever the caller's struct held, and a caller who then
+     * calls gz_client_close or gz_client_reconnect closes an arbitrary
+     * descriptor. adopt is public, so a caller can reach it with anything. */
+    int keep = dup(STDOUT_FILENO);
+    assert(keep >= 0);
+
+    struct gz_client c;
+    memset(&c, 0xAB, sizeof c);
+    c.fd = keep;
+    assert(gz_client_adopt(&c, -1) == -1);
+    assert(errno == EBADF);
+    assert(c.fd == -1);
+    assert(fcntl(keep, F_GETFD) != -1);   /* not closed, and not adoptable */
+
+    /* The queued subscribe is back too, so the struct is usable, not wreckage. */
+    unsigned char sub[8];
+    assert(gz_client_take_outbound(&c, sub, sizeof sub) == 5);
+    assert(sub[0] == GZ_CMD_SUBSCRIBE);
+    close(keep);
 }
 
 static void test_adopt_does_not_leak_the_fd_it_owns(void) {
@@ -927,6 +957,7 @@ int main(void) {
     test_request_returns_the_matching_response();
     test_request_ignores_a_reply_to_another_command();
     test_request_times_out_without_a_reply();
+    test_adopt_rejects_a_bad_fd_without_keeping_it();
     test_adopt_does_not_leak_the_fd_it_owns();
     test_adopt_sets_nonblocking();
 

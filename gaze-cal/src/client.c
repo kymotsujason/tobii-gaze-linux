@@ -48,7 +48,15 @@ void gz_client_close(struct gz_client *c) {
 }
 
 int gz_client_adopt(struct gz_client *c, int fd) {
-    if (fd < 0) { errno = EBADF; return -1; }
+    if (fd < 0) {
+        /* Same contract as every other -1 return here: fd left at -1. Without
+         * the init, c->fd keeps whatever the caller's struct held, and a
+         * caller who then calls gz_client_close or gz_client_reconnect closes
+         * an arbitrary descriptor. init memsets, so errno is set after it. */
+        gz_client_init(c);
+        errno = EBADF;
+        return -1;
+    }
 
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {

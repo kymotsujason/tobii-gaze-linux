@@ -120,8 +120,17 @@ struct gz_client {
      * 11 s outage). The reset is load-bearing for the opposite reason. The
      * counter keeps advancing while the client is away, so carrying
      * prev_counter across a reconnect charges the entire absence to dropped:
-     * a measured reconnect gap of 870 counts is 217 samples that would have
-     * been reported as lost. Never compare dropped across a reconnect. */
+     * that measured 870-count gap becomes 216 samples reported as lost.
+     * Never compare dropped across a reconnect.
+     *
+     * Two things Task 13 will otherwise trip over. The counter is NOT
+     * congruent mod 4 across a reconnect: 531802 - 530932 = 870, and 870 % 4
+     * is 2, so the daemon restart shifted the phase. Any check of the form
+     * (next - prev) % GZ_FRAME_COUNTER_STEP == 0 is valid only within one
+     * uninterrupted stream. And because gz_frames_dropped truncates
+     * (delta / 4 - 1), a phase-shifted gap reads one LOW: 870 counts is 217.5
+     * sample intervals and reports 216, not 217. Nothing is broken by either,
+     * but dropped is a floor, not an exact count. */
     uint32_t prev_counter;
     int have_prev_counter;
     uint64_t dropped;

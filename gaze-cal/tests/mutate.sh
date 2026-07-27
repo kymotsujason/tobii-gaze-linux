@@ -302,6 +302,13 @@ run_mutation "caller watchdog interval ignored" client.c \
     "    if (now_ns - c->last_gaze_ns <= interval_ns) return GZ_LINK_OK;" \
     "    if (now_ns - c->last_gaze_ns <= GZ_WATCHDOG_NS) return GZ_LINK_OK;"
 
+run_mutation "adopt keeps the caller's fd when handed a bad one" client.c \
+    "        gz_client_init(c);
+        errno = EBADF;
+        return -1;" \
+    "        errno = EBADF;
+        return -1;"
+
 run_mutation "adopt leaks the fd it owns on a failed subscribe" client.c \
     "        int e = errno;
         gz_client_close(c);
