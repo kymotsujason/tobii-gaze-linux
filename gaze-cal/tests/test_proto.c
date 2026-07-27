@@ -1337,9 +1337,22 @@ static struct gz_correction mk_corr(double gx, double gy, double bx, double by) 
     memset(&c, 0, sizeof c);
     c.gx = gx; c.gy = gy; c.bx = bx; c.by = by;
     c.area = measured_area();
+    c.form = GZ_CORR_FORM_STATIC;
+    /* The seat the measured sweeps were taken at. Not on the transform path,
+     * but gz_correction_check refuses a NaN or an absurd one. */
+    c.eye_proj[0] = 0.5265;
+    c.eye_proj[1] = 0.9818;
     c.valid = 1;
     return c;
 }
+
+/* Every key gz_correction_format writes, well formed, so the variants below
+ * differ only in the one thing each is testing. */
+#define CORR_GOOD_TEXT \
+    "version=2\nform=1\ngx=1.1695\ngy=1.1875\nbx=-0.1034\nby=-0.2479\n" \
+    "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n" \
+    "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n" \
+    "fit_eye_proj_x=0.5265\nfit_eye_proj_y=0.9818\n"
 
 static void test_eye_proj_is_hand_computable(void) {
     struct gz_rect a = measured_area();
@@ -1444,16 +1457,13 @@ static void test_eye_mid_refuses_an_eyeless_frame(void) {
 
 static void test_correction_identity_returns_the_input(void) {
     struct gz_correction c = mk_corr(1.0, 1.0, 0.0, 0.0);
-    struct gz_eye_state e;
-    gz_eye_state_init(&e);
     const double pts[][2] = { {0.1, 0.1}, {0.5, 0.5}, {0.9, 0.9}, {0.0, 1.0}, {0.37, 0.62} };
     for (size_t i = 0; i < sizeof pts / sizeof pts[0]; i++) {
         struct gz_gaze_sample s = mk_gaze(pts[i][0], pts[i][1], EYE_L, EYE_R,
                                           GZ_VALIDITY_VALID, GZ_VALIDITY_VALID);
         double out[2] = { -9, -9 };
-        assert(gz_gaze_correct(&c, &e, &s, out) == 1);
-        /* Bit for bit, not within a tolerance. The multiplied-out form in
-         * proto.c exists so this holds. */
+        assert(gz_gaze_correct(&c, &s, out) == 1);
+        /* Bit for bit, not within a tolerance. */
         assert(out[0] == pts[i][0]);
         assert(out[1] == pts[i][1]);
     }
@@ -1462,121 +1472,100 @@ static void test_correction_identity_returns_the_input(void) {
 static void test_correction_inverts_the_forward_model(void) {
     /* Build a reported point from the model, correct it, and land back on the
      * truth. This is what catches an inverted gain or a dropped offset. */
-    struct gz_rect a = measured_area();
-    const double gx = 1.1713, gy = 1.1624, bx = -0.0043, by = -0.1487;
+    const double gx = 1.1695, gy = 1.1875, bx = -0.1034, by = -0.2479;
     struct gz_correction c = mk_corr(gx, gy, bx, by);
-    struct gz_eye_state e;
-    gz_eye_state_init(&e);
-
-    double ep[2];
-    double mid[3] = { (EYE_L[0] + EYE_R[0]) / 2.0,
-                      (EYE_L[1] + EYE_R[1]) / 2.0,
-                      (EYE_L[2] + EYE_R[2]) / 2.0 };
-    gz_eye_proj(a, mid, ep);
 
     for (int i = 0; i < GZ_CAL_POINTS_IN_TEST; i++) {
         double tx = 0.1 + 0.4 * (i % 3), ty = 0.1 + 0.4 * (i / 3);
-        double rx = ep[0] + gx * (tx - ep[0]) + bx;
-        double ry = ep[1] + gy * (ty - ep[1]) + by;
+        double rx = gx * tx + bx;
+        double ry = gy * ty + by;
         struct gz_gaze_sample s = mk_gaze(rx, ry, EYE_L, EYE_R,
                                           GZ_VALIDITY_VALID, GZ_VALIDITY_VALID);
         double out[2];
-        assert(gz_gaze_correct(&c, &e, &s, out) == 1);
+        assert(gz_gaze_correct(&c, &s, out) == 1);
         assert(fabs(out[0] - tx) < 1e-12);
         assert(fabs(out[1] - ty) < 1e-12);
     }
 }
 
 static void test_correction_refuses_and_leaves_out_untouched(void) {
-    struct gz_correction c = mk_corr(1.1713, 1.1624, 0.0, 0.0);
-    struct gz_eye_state e;
-    gz_eye_state_init(&e);
+    struct gz_correction c = mk_corr(1.1695, 1.1875, 0.0, 0.0);
 
-    /* Both eyes not detected. Spec 5.2: return 0, out untouched. */
+    /* Both eyes not detected. The gaze point is still there and
+     * present_mask still claims everything, so validity is the only signal:
+     * return 0, out untouched. */
     struct gz_gaze_sample none = mk_gaze(0.5, 0.5, NULL, NULL,
                                          GZ_VALIDITY_NOT_DETECTED, GZ_VALIDITY_NOT_DETECTED);
+    assert(none.present_mask == 0x003fffffu);
     double out[2] = { 42.0, 43.0 };
-    assert(gz_gaze_correct(&c, &e, &none, out) == 0);
+    assert(gz_gaze_correct(&c, &none, out) == 0);
     assert(out[0] == 42.0 && out[1] == 43.0);
+
+    /* One eye is enough: form S needs no midpoint at all. */
+    struct gz_gaze_sample one = mk_gaze(0.5, 0.5, EYE_L, NULL,
+                                        GZ_VALIDITY_VALID, GZ_VALIDITY_NOT_DETECTED);
+    assert(gz_gaze_correct(&c, &one, out) == 1);
 
     /* An unfitted correction is refused before anything else is read. */
     struct gz_correction unset;
     memset(&unset, 0, sizeof unset);
     struct gz_gaze_sample good = mk_gaze(0.5, 0.5, EYE_L, EYE_R,
                                          GZ_VALIDITY_VALID, GZ_VALIDITY_VALID);
-    assert(gz_gaze_correct(&unset, &e, &good, out) == 0);
+    out[0] = 42.0; out[1] = 43.0;
+    assert(gz_gaze_correct(&unset, &good, out) == 0);
     assert(out[0] == 42.0 && out[1] == 43.0);
 }
 
-static void test_the_single_eye_shortcut_would_move_the_gaze(void) {
-    /* Why the reconstruction in 3.1 is not decoration. Using the lone valid eye
-     * as the midpoint shifts E_proj by half an interpupillary distance, which
-     * lands as a visible jump the moment one eye blinks. */
-    struct gz_correction c = mk_corr(1.1713, 1.1624, 0.0, 0.0);
+static void test_the_single_eye_shortcut_still_moves_the_midpoint(void) {
+    /* The midpoint is off the correction path under form S, but the sweep still
+     * records it and spec 5.6 wants the head-aware question re-openable from
+     * that record. Using the lone valid eye instead of reconstructing would put
+     * half an interpupillary distance of error into every such record. */
     struct gz_eye_state e;
     gz_eye_state_init(&e);
     struct gz_gaze_sample both = mk_gaze(0.5, 0.5, EYE_L, EYE_R,
                                          GZ_VALIDITY_VALID, GZ_VALIDITY_VALID);
-    double reconstructed[2];
-    assert(gz_gaze_correct(&c, &e, &both, reconstructed) == 1);
+    double mid[3];
+    assert(gz_sample_eye_mid(&e, &both, mid) == 1);
 
     struct gz_gaze_sample one = mk_gaze(0.5, 0.5, EYE_L, NULL,
                                         GZ_VALIDITY_VALID, GZ_VALIDITY_NOT_DETECTED);
-    double kept[2];
-    assert(gz_gaze_correct(&c, &e, &one, kept) == 1);
-    /* The reconstruction holds the midpoint still. */
-    assert(fabs(kept[0] - reconstructed[0]) < 1e-12);
+    double kept[3];
+    assert(gz_sample_eye_mid(&e, &one, kept) == 1);
+    assert(fabs(kept[0] - mid[0]) < 1e-12);
 
-    /* Whereas the lone eye would have moved it by this much, in pixels on the
-     * 2560 px panel. Around 21 px, matching the investigation's figure. */
-    struct gz_correction c2 = c;
-    double lone[2], midp[2];
-    gz_eye_proj(c.area, EYE_L, lone);
-    double mid[3] = { (EYE_L[0] + EYE_R[0]) / 2.0, (EYE_L[1] + EYE_R[1]) / 2.0,
-                      (EYE_L[2] + EYE_R[2]) / 2.0 };
-    gz_eye_proj(c.area, mid, midp);
-    double a[2], b[2], g[2] = { 0.5, 0.5 };
-    gz_correct_point(&c2, lone, g, a);
-    gz_correct_point(&c2, midp, g, b);
-    double jump_px = fabs(a[0] - b[0]) * 2560.0;
-    assert(jump_px > 15.0 && jump_px < 30.0);
+    /* Against the lone eye, which is half an IPD away. */
+    assert(fabs(mid[0] - EYE_L[0]) > 30.0);
+    assert(fabs(mid[0] - EYE_L[0]) < 35.0);
 }
 
-static void test_the_correction_is_head_aware(void) {
-    /* The property that distinguishes this from a plain affine in screen
-     * space: the same reported point corrects differently when the head has
-     * moved, by exactly ((g-1)/g) times the eye displacement. Note that the
-     * displacement that matters is IN THE SCREEN PLANE. Depth does not appear
-     * in E_proj at all, so a head that only moves nearer or further corrects
-     * identically, which is why a depth-only test cannot validate this term. */
-    const double g = 1.1713;
-    struct gz_correction c = mk_corr(g, g, 0.0, 0.0);
-    struct gz_eye_state e;
-    gz_eye_state_init(&e);
+static void test_the_correction_is_not_head_aware(void) {
+    /* The measured decision, and the one a future reader is most likely to try
+     * to undo. The design originally scaled about the eye's projection, form H,
+     * on the geometric argument that an angular gain error must be centred on
+     * the eye. Spec test 5.3 scored both forms on a recorded sweep at a seat
+     * displaced 115 mm in the screen plane and form H lost, 69 px against 53.
+     *
+     * So the corrected point must depend on the reported gaze and nothing else.
+     * Bit equality, not a tolerance: any eye term at all breaks this. */
+    struct gz_correction c = mk_corr(1.1695, 1.1875, -0.1034, -0.2479);
 
-    double shift = 200.0;    /* mm, lateral */
-    double L2[3] = { EYE_L[0] + shift, EYE_L[1], EYE_L[2] };
-    double R2[3] = { EYE_R[0] + shift, EYE_R[1], EYE_R[2] };
-    struct gz_gaze_sample s1 = mk_gaze(0.5, 0.5, EYE_L, EYE_R,
+    double L2[3] = { EYE_L[0] + 250.0, EYE_L[1] - 80.0, EYE_L[2] + 300.0 };
+    double R2[3] = { EYE_R[0] + 250.0, EYE_R[1] - 80.0, EYE_R[2] + 300.0 };
+    struct gz_gaze_sample s1 = mk_gaze(0.42, 0.37, EYE_L, EYE_R,
                                        GZ_VALIDITY_VALID, GZ_VALIDITY_VALID);
-    struct gz_gaze_sample s2 = mk_gaze(0.5, 0.5, L2, R2,
+    struct gz_gaze_sample s2 = mk_gaze(0.42, 0.37, L2, R2,
                                        GZ_VALIDITY_VALID, GZ_VALIDITY_VALID);
     double o1[2], o2[2];
-    assert(gz_gaze_correct(&c, &e, &s1, o1) == 1);
-    assert(gz_gaze_correct(&c, &e, &s2, o2) == 1);
+    assert(gz_gaze_correct(&c, &s1, o1) == 1);
+    assert(gz_gaze_correct(&c, &s2, o2) == 1);
+    assert(o1[0] == o2[0] && o1[1] == o2[1]);
 
-    double want = (g - 1.0) / g * (shift / 590.42);
-    assert(fabs((o2[0] - o1[0]) - want) < 1e-12);
-    assert(fabs((o2[0] - o1[0]) * 2560.0 - 126.8) < 0.5);   /* 0.63 px per mm */
-
-    /* Depth alone changes nothing. */
-    double L3[3] = { EYE_L[0], EYE_L[1], EYE_L[2] + 300.0 };
-    double R3[3] = { EYE_R[0], EYE_R[1], EYE_R[2] + 300.0 };
-    struct gz_gaze_sample s3 = mk_gaze(0.5, 0.5, L3, R3,
-                                       GZ_VALIDITY_VALID, GZ_VALIDITY_VALID);
-    double o3[2];
-    assert(gz_gaze_correct(&c, &e, &s3, o3) == 1);
-    assert(o3[0] == o1[0] && o3[1] == o1[1]);
+    /* What that movement costs instead, which is what the report prints:
+     * ((g-1)/g) times the in-plane displacement. 250 mm at 0.63 px/mm. */
+    double g = (c.gx + c.gy) / 2.0;
+    double px = (g - 1.0) / g * (250.0 / 590.42) * 2560.0;
+    assert(fabs(px - 250.0 * GZ_CORR_DEGRADE_PX_PER_MM) < 10.0);
 }
 
 static void test_correction_check_holds_the_measured_envelope(void) {
@@ -1632,6 +1621,26 @@ static void test_correction_check_holds_the_measured_envelope(void) {
     struct gz_correction flat = mk_corr(1.17, 1.16, 0, 0);
     flat.area.w_mm = 0;
     assert(gz_correction_check(&flat) == 0);
+
+    /* The form lock, tested here rather than only through the parser. The
+     * parser refuses an unknown form before it ever gets this far, so this is
+     * the only reachable test of the predicate itself, and it is what stops a
+     * caller that builds a gz_correction by hand, as the fit does, from
+     * shipping one whose form nobody set. */
+    struct gz_correction unset_form = mk_corr(1.17, 1.16, 0, 0);
+    unset_form.form = 0;
+    assert(gz_correction_check(&unset_form) == 0);
+    struct gz_correction future_form = mk_corr(1.17, 1.16, 0, 0);
+    future_form.form = GZ_CORR_FORM_STATIC + 1;
+    assert(gz_correction_check(&future_form) == 0);
+
+    /* And a seat that is NaN or absurd, which would print as one. */
+    struct gz_correction nan_seat = mk_corr(1.17, 1.16, 0, 0);
+    nan_seat.eye_proj[1] = 0.0 / 0.0;
+    assert(gz_correction_check(&nan_seat) == 0);
+    struct gz_correction wild_seat = mk_corr(1.17, 1.16, 0, 0);
+    wild_seat.eye_proj[0] = 50.0;
+    assert(gz_correction_check(&wild_seat) == 0);
 }
 
 static void test_correction_text_round_trips(void) {
@@ -1648,6 +1657,13 @@ static void test_correction_text_round_trips(void) {
     assert(fabs(back.bx - c.bx) < 1e-9);
     assert(fabs(back.by - c.by) < 1e-9);
     assert(gz_rect_diff(back.area, c.area, 1e-6, 1e-6) == 0);
+    /* The two locks that stop a form H file being read as this one, and the
+     * seat the fit belongs to, which spec 5.6 requires to be recorded. */
+    assert(strstr(buf, "version=2\n") != NULL);
+    assert(strstr(buf, "form=1\n") != NULL);
+    assert(back.form == GZ_CORR_FORM_STATIC);
+    assert(fabs(back.eye_proj[0] - c.eye_proj[0]) < 1e-9);
+    assert(fabs(back.eye_proj[1] - c.eye_proj[1]) < 1e-9);
 
     /* Negative zero and exact integers survive the fixed-point spelling. */
     struct gz_correction z = mk_corr(1.2, 1.2, 0.0, 0.0);
@@ -1702,25 +1718,31 @@ static void test_parse_ignores_provenance_and_comments(void) {
     const char *text =
         "# fitted 2026-07-27\n"
         "\n"
-        "version=1\n"
-        "gx = 1.1713\n"
-        "gy=1.1624\n"
-        "bx=-0.0043\n"
-        "by=-0.1487\n"
+        "version=2\n"
+        "form = 1\n"
+        "gx = 1.1695\n"
+        "gy=1.1875\n"
+        "bx=-0.1034\n"
+        "by=-0.2479\n"
         "area_w_mm=590.42\n"
         "area_h_mm=333.72\n"
         "area_ox_mm=-295.21\n"
         "area_oy_mm=5\n"
         "area_z_mm=-7.5\n"
         "area_tilt_deg=0\n"
-        "fit_utc=2026-07-27T05:41:00Z\n"
+        "fit_eye_proj_x=0.5265\n"
+        "fit_eye_proj_y=0.9818\n"
+        "fit_utc=2026-07-27T14:35:00Z\n"
         "fit_points=9\n"
-        "fit_eye_z_mm=598\n";
+        "degrade_px_per_mm=0.628\n"
+        "fit_eye_z_mm=675\n";
     struct gz_correction c;
     assert(gz_correction_parse(text, strlen(text), &c) == GZ_CORR_PARSE_OK);
-    assert(fabs(c.gx - 1.1713) < 1e-12);
+    assert(fabs(c.gx - 1.1695) < 1e-12);
     assert(fabs(c.area.ox_mm - -295.21) < 1e-12);
     assert(c.area.tilt_deg == 0.0);
+    assert(c.form == GZ_CORR_FORM_STATIC);
+    assert(fabs(c.eye_proj[1] - 0.9818) < 1e-12);
 
     /* A file with no trailing newline is the same file. */
     char trimmed[1024];
@@ -1729,45 +1751,88 @@ static void test_parse_ignores_provenance_and_comments(void) {
     assert(gz_correction_parse(trimmed, n - 1, &c) == GZ_CORR_PARSE_OK);
 }
 
-static void test_parse_refuses_everything_it_cannot_account_for(void) {
-    const char *good =
-        "version=1\ngx=1.1713\ngy=1.1624\nbx=-0.0043\nby=-0.1487\n"
+static void test_parse_refuses_a_form_h_file(void) {
+    /* The reason the version was bumped. A form H file carries exactly these
+     * key names, and its bx and by are measured relative to the eye's
+     * projection rather than absolutely. Applying one here would be wrong by
+     * (1-g) * E_proj, roughly 90 px, and would look like a calibration.
+     *
+     * This is the real correction.conf that shipped before spec test 5.3
+     * decided against form H. */
+    const char *form_h =
+        "version=1\n"
+        "gx=1.17213\ngy=1.189524978\nbx=-0.014093408\nby=-0.0627924\n"
         "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n"
-        "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n";
+        "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n"
+        "fit_utc=2026-07-27T14:35:06Z\nfit_points=9\nfit_eye_z_mm=675.0\n";
+    struct gz_correction c;
+    /* STALE, not MALFORMED: the file is well formed, it is just of a version
+     * this build does not apply, and the two have different remedies. The
+     * version is judged before the key set, because an older version is
+     * entitled to a different one. */
+    assert(gz_correction_parse(form_h, strlen(form_h), &c) == GZ_CORR_PARSE_STALE);
+
+    /* And a file that claims the current version but an unknown form. */
+    const char *future =
+        "version=2\nform=2\ngx=1.1695\ngy=1.1875\nbx=-0.1034\nby=-0.2479\n"
+        "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n"
+        "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n"
+        "fit_eye_proj_x=0.5265\nfit_eye_proj_y=0.9818\n";
+    assert(gz_correction_parse(future, strlen(future), &c) == GZ_CORR_PARSE_STALE);
+
+    /* A file with no version at all is malformed rather than stale: nothing
+     * says what it was meant to be. */
+    const char *nover =
+        "form=1\ngx=1.1695\ngy=1.1875\nbx=-0.1034\nby=-0.2479\n"
+        "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n"
+        "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n"
+        "fit_eye_proj_x=0.5265\nfit_eye_proj_y=0.9818\n";
+    assert(gz_correction_parse(nover, strlen(nover), &c) == GZ_CORR_PARSE_MALFORMED);
+}
+
+static void test_parse_refuses_everything_it_cannot_account_for(void) {
+    const char *good = CORR_GOOD_TEXT;
     struct gz_correction c;
     assert(gz_correction_parse(good, strlen(good), &c) == GZ_CORR_PARSE_OK);
 
     char buf[1024];
 
-    /* A missing key. A default would be a number nobody chose. */
-    const char *missing =
-        "version=1\ngx=1.1713\ngy=1.1624\nbx=-0.0043\nby=-0.1487\n"
-        "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n"
-        "area_oy_mm=5\narea_z_mm=-7.5\n";
-    assert(gz_correction_parse(missing, strlen(missing), &c) == GZ_CORR_PARSE_MALFORMED);
+    /* A missing key, one at a time, over every key the format models. A default
+     * for any of them would be a number nobody chose. */
+    static const char *const keys[] = {
+        "gx=", "gy=", "bx=", "by=", "area_w_mm=",
+        "area_h_mm=", "area_ox_mm=", "area_oy_mm=", "area_z_mm=",
+        "area_tilt_deg=", "fit_eye_proj_x=", "fit_eye_proj_y="
+    };
+    for (size_t k = 0; k < sizeof keys / sizeof keys[0]; k++) {
+        const char *at = strstr(good, keys[k]);
+        assert(at != NULL);
+        const char *eol = strchr(at, '\n');
+        assert(eol != NULL);
+        size_t head = (size_t)(at - good);
+        size_t tail = strlen(eol + 1);
+        assert(head + tail < sizeof buf);
+        memcpy(buf, good, head);
+        memcpy(buf + head, eol + 1, tail);
+        assert(gz_correction_parse(buf, head + tail, &c) == GZ_CORR_PARSE_MALFORMED);
+    }
 
     /* A repeated key: nobody could say which gain is in force. */
     snprintf(buf, sizeof buf, "%sgx=1.2\n", good);
     assert(gz_correction_parse(buf, strlen(buf), &c) == GZ_CORR_PARSE_MALFORMED);
 
-    /* A version this build does not write. */
-    const char *v2 =
-        "version=2\ngx=1.1713\ngy=1.1624\nbx=-0.0043\nby=-0.1487\n"
-        "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n"
-        "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n";
-    assert(gz_correction_parse(v2, strlen(v2), &c) == GZ_CORR_PARSE_MALFORMED);
-
     /* Junk where a number belongs, and junk after one. */
-    const char *nan_text =
-        "version=1\ngx=nan\ngy=1.1624\nbx=-0.0043\nby=-0.1487\n"
-        "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n"
-        "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n";
-    assert(gz_correction_parse(nan_text, strlen(nan_text), &c) == GZ_CORR_PARSE_MALFORMED);
-    const char *trailing =
-        "version=1\ngx=1.1713abc\ngy=1.1624\nbx=-0.0043\nby=-0.1487\n"
-        "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n"
-        "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n";
-    assert(gz_correction_parse(trailing, strlen(trailing), &c) == GZ_CORR_PARSE_MALFORMED);
+    snprintf(buf, sizeof buf, "%s", good);
+    char *g = strstr(buf, "gx=1.1695");
+    assert(g != NULL);
+    memcpy(g, "gx=nan   ", 9);
+    assert(gz_correction_parse(buf, strlen(buf), &c) == GZ_CORR_PARSE_MALFORMED);
+
+    snprintf(buf, sizeof buf, "%s", good);
+    g = strstr(buf, "gy=1.1875");
+    assert(g != NULL);
+    memcpy(g, "gy=1.18zz", 9);
+    assert(gz_correction_parse(buf, strlen(buf), &c) == GZ_CORR_PARSE_MALFORMED);
 
     /* A line that is not key=value at all. */
     snprintf(buf, sizeof buf, "%sthis is not a setting\n", good);
@@ -1782,40 +1847,42 @@ static void test_parse_reports_a_bad_gain_separately(void) {
     /* Well formed but outside the envelope. The caller gets the numbers so it
      * can name the gain it refused, and valid stays 0 so nothing can use it. */
     const char *text =
-        "version=1\ngx=2.5\ngy=2.5\nbx=0\nby=0\n"
+        "version=2\nform=1\ngx=2.5\ngy=2.5\nbx=0\nby=0\n"
         "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n"
-        "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n";
+        "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n"
+        "fit_eye_proj_x=0.5265\nfit_eye_proj_y=0.9818\n";
     struct gz_correction c;
     assert(gz_correction_parse(text, strlen(text), &c) == GZ_CORR_PARSE_BOUNDS);
     assert(c.valid == 0);
     assert(fabs(c.gx - 2.5) < 1e-12);
 
-    struct gz_eye_state e;
-    gz_eye_state_init(&e);
     struct gz_gaze_sample s = mk_gaze(0.5, 0.5, EYE_L, EYE_R,
                                       GZ_VALIDITY_VALID, GZ_VALIDITY_VALID);
     double out[2] = { 1, 2 };
-    assert(gz_gaze_correct(&c, &e, &s, out) == 0);
+    assert(gz_gaze_correct(&c, &s, out) == 0);
     assert(out[0] == 1 && out[1] == 2);
 }
 
 static void test_parse_handles_exponent_and_odd_spacing(void) {
     const char *text =
-        "version=1\r\n"
-        "  gx  =  1.1713e0  \n"
-        "gy=+1.1624\n"
-        "bx=-4.3e-3\n"
-        "by=-0.1487\n"
+        "version=2\r\n"
+        "form=1\n"
+        "  gx  =  1.1695e0  \n"
+        "gy=+1.1875\n"
+        "bx=-1.034e-1\n"
+        "by=-0.2479\n"
         "area_w_mm=5.9042e2\n"
         "area_h_mm=333.72\n"
         "area_ox_mm=-295.21\n"
         "area_oy_mm=5.\n"
         "area_z_mm=-7.5\n"
-        "area_tilt_deg=0\n";
+        "area_tilt_deg=0\n"
+        "fit_eye_proj_x=0.5265\n"
+        "fit_eye_proj_y=0.9818\n";
     struct gz_correction c;
     assert(gz_correction_parse(text, strlen(text), &c) == GZ_CORR_PARSE_OK);
-    assert(fabs(c.gx - 1.1713) < 1e-12);
-    assert(fabs(c.bx - -0.0043) < 1e-15);
+    assert(fabs(c.gx - 1.1695) < 1e-12);
+    assert(fabs(c.bx - -0.1034) < 1e-15);
     assert(fabs(c.area.w_mm - 590.42) < 1e-9);
     assert(c.area.oy_mm == 5.0);
 }
@@ -1942,12 +2009,13 @@ int main(void) {
     test_correction_identity_returns_the_input();
     test_correction_inverts_the_forward_model();
     test_correction_refuses_and_leaves_out_untouched();
-    test_the_single_eye_shortcut_would_move_the_gaze();
-    test_the_correction_is_head_aware();
+    test_the_single_eye_shortcut_still_moves_the_midpoint();
+    test_the_correction_is_not_head_aware();
     test_correction_check_holds_the_measured_envelope();
     test_correction_text_round_trips();
     test_correction_text_is_locale_independent();
     test_parse_ignores_provenance_and_comments();
+    test_parse_refuses_a_form_h_file();
     test_parse_refuses_everything_it_cannot_account_for();
     test_parse_reports_a_bad_gain_separately();
     test_parse_handles_exponent_and_odd_spacing();

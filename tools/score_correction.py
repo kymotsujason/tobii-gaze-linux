@@ -7,18 +7,23 @@ every sweep:
 
     pt 1 target 0.100000 0.100000  gaze 0.088281 0.061806  eye_mm 18.42 70.61 429.10  eproj 0.531198 0.803398  n 18
 
-Given two such sweeps it fits form H on the first and scores BOTH candidate
-forms on the second:
+Given two such sweeps it fits BOTH candidate forms on the first and scores both
+on the second:
 
     form H, head-aware:    corrected = E_proj + (reported - E_proj - b) / g
-    form S, static affine: corrected = (reported - b') / g, b' frozen at the
-                           fit position, which is the same arithmetic with
-                           E_proj held at its fit-time value
+    form S, static affine: corrected = (reported - b) / g, no eye term at all
 
 The two differ by ((g-1)/g) * (E_apply - E_fit), which on this panel is
 0.63 px per mm of head movement IN THE SCREEN PLANE. E_proj has no z term, so a
 seating change purely in DEPTH cannot separate them: the discriminating move is
 lateral or vertical.
+
+THIS QUESTION HAS BEEN ANSWERED. On 2026-07-27, fitted on fit#9 and scored on
+lateral2 at a seat displaced 115 mm, form H gave a 69 px median against form
+S's 53, so form S is what gaze-cal ships and form S is what this tool fits.
+The comparison is kept because spec 5.6 says to re-open the question once more
+sweeps carry per-point eye origins, and because it is the record of how the
+decision was made. Do not delete it to simplify the tool.
 
 Usage:
     tools/score_correction.py                       list the sweeps in the log
@@ -134,13 +139,13 @@ def ols(vs, us, use):
     return slope, mu - slope * mv
 
 
-def fit(sweep):
+def fit(sweep, head_aware=False):
     """The same fit gz_correction_fit performs, including its outlier rule.
 
-    This must mirror the shipped C exactly. If `gaze-cal fit` rejected a point
-    and this tool did not, spec test 5.3 would be decided against gains that are
-    not the ones in correction.conf, and the verdict could flip in a marginal
-    case.
+    The default is form S, which is what gaze-cal stores: if this tool fitted
+    differently from the shipped C, it would answer questions about parameters
+    nobody is running. `head_aware=True` fits form H instead, which is only for
+    the 5.3 comparison.
     """
     check_geometry(sweep)
     pts = [sweep["pts"][i] for i in sorted(sweep["pts"])]
@@ -148,8 +153,12 @@ def fit(sweep):
         sys.exit("%s has %d points; a fit needs all nine (do-not #9)"
                  % (sweep["label"], len(pts)))
 
-    v = [[p["target"][a] - p["eproj"][a] for p in pts] for a in (0, 1)]
-    u = [[p["gaze"][a] - p["eproj"][a] for p in pts] for a in (0, 1)]
+    if head_aware:
+        v = [[p["target"][a] - p["eproj"][a] for p in pts] for a in (0, 1)]
+        u = [[p["gaze"][a] - p["eproj"][a] for p in pts] for a in (0, 1)]
+    else:
+        v = [[p["target"][a] for p in pts] for a in (0, 1)]
+        u = [[p["gaze"][a] for p in pts] for a in (0, 1)]
     use = [True] * len(pts)
     rejected = [False] * len(pts)
 
@@ -166,7 +175,7 @@ def fit(sweep):
         # by the factor g, and the C fit rejects on the first.
         resid = []
         for i, p in enumerate(pts):
-            cor = correct(g, b, p["eproj"], p["gaze"])
+            cor = correct(g, b, p["eproj"] if head_aware else (0.0, 0.0), p["gaze"])
             resid.append(math.hypot((cor[0] - p["target"][0]) * AREA_W_MM,
                                     (cor[1] - p["target"][1]) * AREA_H_MM))
         if second_pass:
@@ -198,17 +207,17 @@ def fit(sweep):
 
 
 def correct(g, b, eproj, reported):
-    """corrected = E + (r - E - b)/g, spelled so g == 1 and b == 0 is exact."""
+    """(r + E(g-1) - b)/g. E is (0,0) for form S, which reduces it to (r-b)/g."""
     return tuple((reported[a] + eproj[a] * (g[a] - 1.0) - b[a]) / g[a] for a in (0, 1))
 
 
-def score(sweep, g, b, eproj_fixed):
-    """Returns per-point pixel errors for form H and for form S."""
+def score(sweep, gh, bh, gs, bs):
+    """Per-point pixel errors: raw, form H with its own fit, form S with its."""
     rows = []
     for i in sorted(sweep["pts"]):
         p = sweep["pts"][i]
-        ch = correct(g, b, p["eproj"], p["gaze"])          # head-aware
-        cs = correct(g, b, eproj_fixed, p["gaze"])         # eye frozen at fit time
+        ch = correct(gh, bh, p["eproj"], p["gaze"])        # head-aware
+        cs = correct(gs, bs, (0.0, 0.0), p["gaze"])        # no eye term
         eh = math.hypot((ch[0] - p["target"][0]) * SCREEN_W_PX,
                         (ch[1] - p["target"][1]) * SCREEN_H_PX)
         es = math.hypot((cs[0] - p["target"][0]) * SCREEN_W_PX,
@@ -257,10 +266,12 @@ def main():
     fs, ss = pick(sweeps, args.fit_label), pick(sweeps, args.score_label)
     print("fitted on   %-24s %s" % (fs["label"], fs["when"]))
     print("scored on   %-24s %s" % (ss["label"], ss["when"]))
-    g, b, ep_fit, rejected, fit_resid, used = fit(fs)
+    g, b, ep_fit, rejected, fit_resid, used = fit(fs)          # form S, the shipped one
+    gh, bh, _, _, _, _ = fit(fs, head_aware=True)              # form H, for 5.3 only
     check_geometry(ss)
 
-    print("\ngx %.5f  gy %.5f  bx %+.6f  by %+.6f  isotropy %.4f"
+    print("\nform S, as shipped:")
+    print("  gx %.5f  gy %.5f  bx %+.6f  by %+.6f  isotropy %.4f"
           % (g[0], g[1], b[0], b[1], g[0] / g[1]))
     kept_resid = [r for r, k in zip(fit_resid, used) if k]
     print("points used %d of 9%s, median residual on the fit sweep %.0f px" % (
@@ -278,7 +289,7 @@ def main():
               " hold these numbers.")
     print("fit-time eye projection  %.4f %.4f" % ep_fit)
 
-    rows = score(ss, g, b, ep_fit)
+    rows = score(ss, gh, bh, g, b)
     eps = [r[4] for r in rows]
     ep_score = (sum(e[0] for e in eps) / len(eps), sum(e[1] for e in eps) / len(eps))
     dx_mm = (ep_score[0] - ep_fit[0]) * AREA_W_MM
@@ -303,7 +314,8 @@ def main():
     print("worst    raw %.0f px   form H %.0f px   form S %.0f px"
           % (max(r[1] for r in rows), max(r[2] for r in rows), max(r[3] for r in rows)))
 
-    print("\nverdict, against spec 5.3:")
+    print("\nverdict, against spec 5.3. It was DECIDED for form S on 2026-07-27;")
+    print("this rerun is a check, not an open question:")
     if sep < 20:
         print("  INCONCLUSIVE. The head moved %.0f mm in the screen plane, which"
               % math.hypot(dx_mm, dy_mm))
@@ -318,7 +330,9 @@ def main():
         print("  FORM S WINS. The scale centre is not the eye: section 1.3a's risk")
         print("  is real. Ship form S and go to spec 5.6.")
     elif mh < 60:
-        print("  HEAD-AWARE CONFIRMED. Ship form H.")
+        print("  Form H would win here, which CONTRADICTS the 2026-07-27 result")
+        print("  (H 69 px against S 53 at a 115 mm displacement). Do not switch on")
+        print("  one sweep: reproduce it at a second displaced seat first.")
     else:
         print("  Form H beats form S but sits above 60 px. The term is earning its")
         print("  place, but something else is degraded. Check the eye origin is")

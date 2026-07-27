@@ -111,8 +111,10 @@ int main() {
      * whole path has to work without a single libc call beyond memcpy. */
     struct gz_correction corr;
     std::memset(&corr, 0, sizeof corr);
-    corr.gx = 1.1713; corr.gy = 1.1624; corr.bx = -0.0043; corr.by = -0.1487;
+    corr.gx = 1.1695; corr.gy = 1.1875; corr.bx = -0.1034; corr.by = -0.2479;
     corr.area = gz_rect{590.42, 333.72, -295.21, 5.0, -7.5, 0.0};
+    corr.form = GZ_CORR_FORM_STATIC;
+    corr.eye_proj[0] = 0.5265; corr.eye_proj[1] = 0.9818;
     corr.valid = 1;
     assert(gz_correction_check(&corr) == 1);
 
@@ -122,9 +124,6 @@ int main() {
     struct gz_correction parsed;
     assert(gz_correction_parse(text, tn, &parsed) == GZ_CORR_PARSE_OK);
     assert(parsed.valid == 1);
-
-    struct gz_eye_state eye;
-    gz_eye_state_init(&eye);
 
     struct gz_gaze_sample g;
     std::memset(&g, 0, sizeof g);
@@ -136,21 +135,31 @@ int main() {
     g.eye_origin_L_mm[0] = -22.96; g.eye_origin_L_mm[1] = 75.65; g.eye_origin_L_mm[2] = 439.40;
     g.eye_origin_R_mm[0] =  43.05; g.eye_origin_R_mm[1] = 75.84; g.eye_origin_R_mm[2] = 437.81;
 
+    /* The eye midpoint and its projection are no longer on the correction path,
+     * but the plugin will still want them to record where the head is, so both
+     * symbols have to resolve from C++ too. */
+    struct gz_eye_state eye;
+    gz_eye_state_init(&eye);
     double mid[3];
     assert(gz_sample_eye_mid(&eye, &g, mid) == 1);
     double ep[2];
     gz_eye_proj(parsed.area, mid, ep);
+    assert(ep[0] > 0.0 && ep[0] < 1.0);
+
     double direct[2];
-    gz_correct_point(&parsed, ep, g.gaze_point_2d_norm, direct);
+    gz_correct_point(&parsed, g.gaze_point_2d_norm, direct);
 
     double corrected[2];
-    assert(gz_gaze_correct(&parsed, &eye, &g, corrected) == 1);
+    assert(gz_gaze_correct(&parsed, &g, corrected) == 1);
     assert(corrected[0] == direct[0] && corrected[1] == direct[1]);
-    /* The device over-reports by a gain about the eye projection, so undoing
-     * it pulls the point back TOWARD that projection without crossing it. */
-    assert(ep[0] > g.gaze_point_2d_norm[0]);
-    assert(corrected[0] > g.gaze_point_2d_norm[0]);
-    assert(corrected[0] < ep[0]);
+    /* Form S has no eye term, so the same reported point corrects the same way
+     * wherever the head is. */
+    struct gz_gaze_sample moved = g;
+    moved.eye_origin_L_mm[0] += 200.0;
+    moved.eye_origin_R_mm[0] += 200.0;
+    double after[2];
+    assert(gz_gaze_correct(&parsed, &moved, after) == 1);
+    assert(after[0] == corrected[0] && after[1] == corrected[1]);
 
     std::printf("all proto C++ interop tests passed\n");
     return 0;

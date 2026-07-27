@@ -377,44 +377,41 @@ void gz_eye_proj(struct gz_rect area, const double eye_mm[3], double out[2]) {
 int gz_correction_check(const struct gz_correction *c) {
     /* !(x) rather than (!x) throughout, so a NaN parameter fails every test
      * instead of passing the ones phrased as a negation. */
+    if (c->form != GZ_CORR_FORM_STATIC) return 0;
     if (!(c->gx >= GZ_CORR_G_MIN) || !(c->gx <= GZ_CORR_G_MAX)) return 0;
     if (!(c->gy >= GZ_CORR_G_MIN) || !(c->gy <= GZ_CORR_G_MAX)) return 0;
     if (!(fabs(c->gx / c->gy - 1.0) < GZ_CORR_ISO_TOL)) return 0;
     if (!(fabs(c->bx) < 1.0) || !(fabs(c->by) < 1.0)) return 0;
     if (!(c->area.w_mm > 0.0) || !(c->area.h_mm > 0.0)) return 0;
+    /* The seat is only ever printed, but a NaN there would print as one and a
+     * wild value would claim the head had moved a kilometre. */
+    if (!(fabs(c->eye_proj[0]) < 5.0) || !(fabs(c->eye_proj[1]) < 5.0)) return 0;
     return 1;
 }
 
-/* The spec writes this as E + (r - E - b)/g. Multiplied out it is
- * (r + E*(g-1) - b)/g, which is algebraically the same and better in two ways:
- * it is exact at the identity g = 1, b = 0, where the first form subtracts E
- * and adds it back and need not land on r; and it avoids cancelling r against E
- * when the eye happens to project near the gaze point. Only a reported
- * coordinate of exactly -0.0 fails to round-trip, coming back as +0.0.
+/* (r - b)/g, exact at the identity g = 1, b = 0 for every input except a
+ * reported coordinate of exactly -0.0, which comes back as +0.0.
  *
  * One spelling, called by both the live path and the offline scoring in
  * calibrate.c, so the two cannot drift apart. */
-void gz_correct_point(const struct gz_correction *c, const double eye_proj[2],
+void gz_correct_point(const struct gz_correction *c,
                       const double reported[2], double out[2]) {
     double v[2];
-    v[0] = (reported[0] + eye_proj[0] * (c->gx - 1.0) - c->bx) / c->gx;
-    v[1] = (reported[1] + eye_proj[1] * (c->gy - 1.0) - c->by) / c->gy;
+    v[0] = (reported[0] - c->bx) / c->gx;
+    v[1] = (reported[1] - c->by) / c->gy;
     memcpy(out, v, sizeof v);
 }
 
-int gz_gaze_correct(const struct gz_correction *c, struct gz_eye_state *e,
+int gz_gaze_correct(const struct gz_correction *c,
                     const struct gz_gaze_sample *s, double out[2]) {
-    /* Both refusals before gz_sample_eye_mid, which writes to e: a sample that
-     * cannot be corrected should not silently arm the reconstruction either. */
     if (!c->valid) return 0;
     if (!(c->gx != 0.0) || !(c->gy != 0.0)) return 0;
+    /* Gated on validity, never on present_mask, which is 0x003fffff in every
+     * frame this firmware sends including the eyeless ones. A frame with no eye
+     * has a gaze_point_2d_norm, and it is not a measurement of anything. */
+    if (!gz_sample_any_eye_valid(s)) return 0;
 
-    double eye[3];
-    if (!gz_sample_eye_mid(e, s, eye)) return 0;
-
-    double ep[2];
-    gz_eye_proj(c->area, eye, ep);
-    gz_correct_point(c, ep, s->gaze_point_2d_norm, out);
+    gz_correct_point(c, s->gaze_point_2d_norm, out);
     return 1;
 }
 
@@ -531,14 +528,19 @@ static int parse_num(const char **pp, const char *end, double *out) {
 
 size_t gz_correction_format(const struct gz_correction *c, char *buf, size_t cap) {
     static const char *const keys[] = {
-        "version", "gx", "gy", "bx", "by",
+        "version", "form", "gx", "gy", "bx", "by",
         "area_w_mm", "area_h_mm", "area_ox_mm", "area_oy_mm",
-        "area_z_mm", "area_tilt_deg"
+        "area_z_mm", "area_tilt_deg",
+        "fit_eye_proj_x", "fit_eye_proj_y"
     };
+    /* `form` is written as its integer, not as the letter S. A number goes
+     * through the same locale-independent path as everything else here, and an
+     * unknown one is refused on parse rather than guessed at. */
     const double vals[] = {
-        (double)GZ_CORRECTION_VERSION, c->gx, c->gy, c->bx, c->by,
+        (double)GZ_CORRECTION_VERSION, (double)c->form, c->gx, c->gy, c->bx, c->by,
         c->area.w_mm, c->area.h_mm, c->area.ox_mm, c->area.oy_mm,
-        c->area.z_mm, c->area.tilt_deg
+        c->area.z_mm, c->area.tilt_deg,
+        c->eye_proj[0], c->eye_proj[1]
     };
     const size_t nkeys = sizeof vals / sizeof vals[0];
 
@@ -564,8 +566,9 @@ size_t gz_correction_format(const struct gz_correction *c, char *buf, size_t cap
 
 /* Every key this format models, in the order the bitmask below counts them. */
 enum {
-    CK_VERSION, CK_GX, CK_GY, CK_BX, CK_BY,
-    CK_W, CK_H, CK_OX, CK_OY, CK_Z, CK_TILT, CK_COUNT
+    CK_VERSION, CK_FORM, CK_GX, CK_GY, CK_BX, CK_BY,
+    CK_W, CK_H, CK_OX, CK_OY, CK_Z, CK_TILT,
+    CK_EPX, CK_EPY, CK_COUNT
 };
 
 static int key_is(const char *k, size_t klen, const char *want) {
@@ -579,9 +582,10 @@ static int key_is(const char *k, size_t klen, const char *want) {
 
 static int key_index(const char *k, size_t klen) {
     static const char *const names[CK_COUNT] = {
-        "version", "gx", "gy", "bx", "by",
+        "version", "form", "gx", "gy", "bx", "by",
         "area_w_mm", "area_h_mm", "area_ox_mm", "area_oy_mm",
-        "area_z_mm", "area_tilt_deg"
+        "area_z_mm", "area_tilt_deg",
+        "fit_eye_proj_x", "fit_eye_proj_y"
     };
     for (int i = 0; i < CK_COUNT; i++) {
         if (key_is(k, klen, names[i])) return i;
@@ -597,7 +601,7 @@ int gz_correction_parse(const char *buf, size_t len, struct gz_correction *out) 
     struct gz_correction c;
     memset(&c, 0, sizeof c);
     unsigned seen = 0;
-    double version = 0.0;
+    double version = 0.0, form = 0.0;
 
     size_t i = 0;
     while (i < len) {
@@ -636,6 +640,7 @@ int gz_correction_parse(const char *buf, size_t len, struct gz_correction *out) 
 
         switch (idx) {
         case CK_VERSION: version       = v; break;
+        case CK_FORM:    form          = v; break;
         case CK_GX:      c.gx          = v; break;
         case CK_GY:      c.gy          = v; break;
         case CK_BX:      c.bx          = v; break;
@@ -646,12 +651,24 @@ int gz_correction_parse(const char *buf, size_t len, struct gz_correction *out) 
         case CK_OY:      c.area.oy_mm  = v; break;
         case CK_Z:       c.area.z_mm   = v; break;
         case CK_TILT:    c.area.tilt_deg = v; break;
+        case CK_EPX:     c.eye_proj[0] = v; break;
+        case CK_EPY:     c.eye_proj[1] = v; break;
         default: break;
         }
     }
 
+    /* The version is judged BEFORE the key set, because an older version is
+     * entitled to a different key set and "stale" is the useful diagnosis. A
+     * version 1 file is a form H fit, whose b is measured relative to the eye's
+     * projection rather than absolutely, so applying it here would be wrong by
+     * (1-g)*E_proj, about 90 px, and would look like a calibration. */
+    if (!(seen & (1u << CK_VERSION))) return GZ_CORR_PARSE_MALFORMED;
+    if (version != (double)GZ_CORRECTION_VERSION) return GZ_CORR_PARSE_STALE;
+    if ((seen & (1u << CK_FORM)) && form != (double)GZ_CORR_FORM_STATIC)
+        return GZ_CORR_PARSE_STALE;
+
     if (seen != (1u << CK_COUNT) - 1u) return GZ_CORR_PARSE_MALFORMED;
-    if (version != (double)GZ_CORRECTION_VERSION) return GZ_CORR_PARSE_MALFORMED;
+    c.form = GZ_CORR_FORM_STATIC;
 
     if (!gz_correction_check(&c)) {
         c.valid = 0;

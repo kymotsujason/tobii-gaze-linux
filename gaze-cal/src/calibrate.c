@@ -461,7 +461,25 @@ static void fit_summary(struct gz_fit_report *rep, const struct gz_fit_input *in
     out->gx = gx; out->gy = gy;
     out->bx = bx; out->by = by;
     out->area = area;
+    out->form = GZ_CORR_FORM_STATIC;
     out->valid = 0;
+    out->eye_proj[0] = out->eye_proj[1] = 0.0;
+
+    /* The seat this fit belongs to. Form S is scoped per seating position, so
+     * this is the number that says which position, and it is what a later sweep
+     * is compared against to predict the degradation. */
+    double ex = 0, ey = 0;
+    unsigned ne = 0;
+    for (int i = 0; i < n; i++) {
+        if (!use[i]) continue;
+        double ep[2];
+        gz_eye_proj(area, in[i].eye_mm, ep);
+        ex += ep[0]; ey += ep[1]; ne++;
+    }
+    rep->eye_proj[0] = ne > 0 ? ex / ne : 0.0;
+    rep->eye_proj[1] = ne > 0 ? ey / ne : 0.0;
+    out->eye_proj[0] = rep->eye_proj[0];
+    out->eye_proj[1] = rep->eye_proj[1];
 }
 
 int gz_correction_fit(const struct gz_fit_input *in, int n, struct gz_rect area,
@@ -473,19 +491,17 @@ int gz_correction_fit(const struct gz_fit_input *in, int n, struct gz_rect area,
     if (n < 4 || n > GZ_CAL_POINTS) return GZ_FIT_ERR_POINTS;
     if (!(area.w_mm > 0) || !(area.h_mm > 0)) return GZ_FIT_ERR_FLAT;
 
-    /* Relative to each point's OWN eye projection. A per-sweep average would
-     * fold the head drift during the sweep into the parameters themselves. */
+    /* Form S regresses the reported point on the target directly. The eye is
+     * not in the model at all: spec test 5.3 measured the eye-relative form
+     * losing to this one, 69 px against 53, at a seat displaced 115 mm. It is
+     * still read below, for the provenance the file carries. */
     double vx[GZ_CAL_POINTS], vy[GZ_CAL_POINTS];
     double ux[GZ_CAL_POINTS], uy[GZ_CAL_POINTS];
-    double epx[GZ_CAL_POINTS], epy[GZ_CAL_POINTS];
     for (int i = 0; i < n; i++) {
-        double ep[2];
-        gz_eye_proj(area, in[i].eye_mm, ep);
-        epx[i] = ep[0]; epy[i] = ep[1];
-        vx[i] = in[i].target[0]   - ep[0];
-        vy[i] = in[i].target[1]   - ep[1];
-        ux[i] = in[i].reported[0] - ep[0];
-        uy[i] = in[i].reported[1] - ep[1];
+        vx[i] = in[i].target[0];
+        vy[i] = in[i].target[1];
+        ux[i] = in[i].reported[0];
+        uy[i] = in[i].reported[1];
     }
 
     int use[GZ_CAL_POINTS];
@@ -504,9 +520,10 @@ int gz_correction_fit(const struct gz_fit_input *in, int n, struct gz_rect area,
         memset(&trial, 0, sizeof trial);
         trial.gx = gx; trial.gy = gy; trial.bx = bx; trial.by = by;
         trial.area = area;
+        trial.form = GZ_CORR_FORM_STATIC;
         for (int i = 0; i < n; i++) {
-            double ep[2] = { epx[i], epy[i] }, cor[2];
-            gz_correct_point(&trial, ep, in[i].reported, cor);
+            double cor[2];
+            gz_correct_point(&trial, in[i].reported, cor);
             rep->resid_mm[i] = hypot((cor[0] - in[i].target[0]) * area.w_mm,
                                      (cor[1] - in[i].target[1]) * area.h_mm);
         }
@@ -602,6 +619,14 @@ int gz_correction_save_to(const char *path, const struct gz_correction *c,
                          rep->n_used, rep->n_rejected,
                          rep->median_resid_mm / mm_per_px,
                          rep->worst_resid_mm / mm_per_px) > 0;
+            /* The seat itself is a modelled key that gz_correction_format
+             * already wrote. This is the rate leaving it costs, which is
+             * derivable from the gains and recorded so nobody has to. */
+            if (ok) {
+                double g = (c->gx + c->gy) / 2.0;
+                ok = fprintf(f, "degrade_px_per_mm=%.3f\n",
+                             g > 0 ? (g - 1.0) / g / mm_per_px : 0.0) > 0;
+            }
         }
         if (ok) ok = fprintf(f, "fit_eye_z_mm=%.1f\n", eye_z_mm) > 0;
     }
@@ -664,6 +689,15 @@ int gz_correction_load_from(const char *path, struct gz_rect want,
     int r = gz_correction_parse(text, n, &c);
     if (r == GZ_CORR_PARSE_MALFORMED) {
         say("%s: does not parse as a correction file. REFUSING.\n", path);
+        return -1;
+    }
+    if (r == GZ_CORR_PARSE_STALE) {
+        say("%s: written by an older build, or in a form this one does not\n"
+            "apply. REFUSING, which is deliberate: a correction fitted as form H\n"
+            "measures its offsets relative to the eye's projection rather than\n"
+            "absolutely, so applying it here would be wrong by about 90 px and\n"
+            "would look exactly like a working calibration.\n"
+            "Re-run `gaze-cal fit` where you sit.\n", path);
         return -1;
     }
     if (r == GZ_CORR_PARSE_BOUNDS) {
@@ -1241,11 +1275,12 @@ static int run_sweep(struct gz_client *c, const struct gz_stim_ops *stim,
  * comparable to each other rather than to the table. */
 static void report_corrected(const struct gz_sweep *sw, const struct gz_screen *scr,
                              const struct gz_correction *corr) {
-    say("\n  correction applied: gx %.5f gy %.5f bx %+.6f by %+.6f\n",
+    say("\n  correction applied: gx %.5f gy %.5f bx %+.6f by %+.6f (form S)\n",
         corr->gx, corr->gy, corr->bx, corr->by);
     say("  point         raw px   corrected px\n");
 
     double raws[GZ_CAL_POINTS], cors[GZ_CAL_POINTS];
+    double eye_sum[2] = { 0, 0 };
     unsigned n = 0;
     double worst = 0;
     for (int i = 0; i < GZ_CAL_POINTS; i++) {
@@ -1254,7 +1289,9 @@ static void report_corrected(const struct gz_sweep *sw, const struct gz_screen *
 
         double ep[2], cor[2];
         gz_eye_proj(corr->area, p->eye_mm, ep);
-        gz_correct_point(corr, ep, p->gaze_mean, cor);
+        eye_sum[0] += ep[0];
+        eye_sum[1] += ep[1];
+        gz_correct_point(corr, p->gaze_mean, cor);
 
         double rawe = hypot((p->gaze_mean[0] - p->target[0]) * scr->w,
                             (p->gaze_mean[1] - p->target[1]) * scr->h);
@@ -1279,13 +1316,32 @@ static void report_corrected(const struct gz_sweep *sw, const struct gz_screen *
     say("verdict: %s (target %.0f px, one degree at 600 mm)\n",
         cs.median <= GZ_ACC_TARGET_PX ? "WITHIN ONE DEGREE" : "OUTSIDE ONE DEGREE",
         GZ_ACC_TARGET_PX);
-    /* The spec's acceptance bands. Reported rather than judged into a single
-     * pass or fail, because 50 to 80 px means the model is right and something
-     * else is degraded, which is a different action from either extreme. */
+
+    /* How far this sweep sat from the seat the fit was taken at, and what form
+     * S costs for it. This is the first thing to check on a degraded run, and
+     * with form S it is the only term that moved. */
+    double moved_px = -1;
+    if (corr->eye_proj[0] != 0.0 || corr->eye_proj[1] != 0.0) {
+        double dx = (eye_sum[0] / n - corr->eye_proj[0]) * corr->area.w_mm;
+        double dy = (eye_sum[1] / n - corr->eye_proj[1]) * corr->area.h_mm;
+        double moved_mm = hypot(dx, dy);
+        moved_px = moved_mm * GZ_CORR_DEGRADE_PX_PER_MM;
+        say("head moved %.0f mm in the screen plane from the seat this fit was"
+            " taken at,\n  which costs form S about %.0f px at %.2f px/mm."
+            " Depth costs nothing.\n",
+            moved_mm, moved_px, GZ_CORR_DEGRADE_PX_PER_MM);
+    }
+
+    /* Reported rather than judged into a single pass or fail: the middle band
+     * has a specific and checkable cause under form S, and it is printed just
+     * above rather than left for the operator to guess at. */
     say("acceptance: %s\n",
-        cs.median > 80.0 ? "ABOVE 80 px, the affine-about-eye model is FALSIFIED"
-      : cs.median > 50.0 ? "50 to 80 px, the model holds but something is degraded:"
-                           " check the eye origin is read per frame"
+        cs.median > 80.0 ? "ABOVE 80 px, the affine model is FALSIFIED"
+      : cs.median > 50.0 ? (moved_px > 15.0
+            ? "50 to 80 px, and the head has left the fitted seat: re-fit where"
+              " you actually sit"
+            : "50 to 80 px with the head still at the fitted seat, so movement"
+              " does not explain it")
       : cs.median >= 35.0 ? "35 to 50 px, as predicted"
                           : "under 35 px, better than predicted");
 }

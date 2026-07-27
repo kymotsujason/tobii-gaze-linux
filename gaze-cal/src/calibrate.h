@@ -255,12 +255,17 @@ struct gz_fit_report {
     double resid_mm[GZ_CAL_POINTS];
     double median_resid_mm, worst_resid_mm;
     double eye_z_mm;                  /* mean over the used points, provenance */
+    /* Where the head was, in normalised display coordinates. Form S is scoped
+     * per seating position, so this identifies which position the fit belongs
+     * to, and a later sweep's distance from it predicts the degradation at
+     * GZ_CORR_DEGRADE_PX_PER_MM. */
+    double eye_proj[2];
 };
 
-/* Two univariate ordinary least squares of (reported - E_proj) on
- * (target - E_proj), one per axis, using each point's OWN eye position. Never
- * a per-sweep average eye: the head drifts during a sweep and averaging folds
- * that drift into the parameters.
+/* Two univariate ordinary least squares of reported on target, one per axis.
+ * Form S: no eye term, because spec test 5.3 measured the eye-relative form
+ * losing at a displaced seat. Each point's eye position is still read, for the
+ * seating position the report and the file record.
  *
  * Rejects a point whose residual exceeds 3x the median and refits once. More
  * than one such point fails the whole sweep, because at that rate the sweep is

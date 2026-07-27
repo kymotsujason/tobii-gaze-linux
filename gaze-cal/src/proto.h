@@ -279,31 +279,50 @@ unsigned gz_rect_diff(struct gz_rect got, struct gz_rect want,
  * The device's display area, ray-plane intersection and normalisation are
  * exact, and its 3D eye sensing is sound (reported IPD 65.56 mm sd 0.19 against
  * a human-measured 65). What is wrong is the gaze DIRECTION: an isotropic,
- * distance-invariant gain of about 1.17, plus an additive vertical offset. The
- * onboard calibration's entire effect is a 4.6 mm eye-origin translation, which
- * cannot express a gain, and no protocol command exists that would make one.
- * So the device cannot be told to fix this and the correction is host-side.
+ * distance-invariant gain of about 1.17, plus an additive offset. The onboard
+ * calibration's entire effect is a 4.6 mm eye-origin translation, which cannot
+ * express a gain, and no protocol command exists that would make one. So the
+ * device cannot be told to fix this and the correction is host-side.
  *
- * The model. The reported point is the true point scaled about the eye's own
- * perpendicular projection onto the display plane, NOT about the screen centre:
+ * The model, form S, a static per-axis affine in normalised display
+ * coordinates:
  *
- *     reported  = E_proj + g * (true - E_proj) + b
- *     corrected = E_proj + (reported - E_proj - b) / g
+ *     reported  = g * true + b
+ *     corrected = (reported - b) / g
  *
- * Both hold identically in normalised display coordinates, so nothing here
- * converts units at runtime beyond computing E_proj once per frame.
+ * There is no eye term, and that is a measured decision rather than a
+ * simplification. The design originally scaled about the eye's own projection
+ * onto the display plane, form H, on the geometric argument that an angular
+ * gain error must be centred on the eye. Spec test 5.3 put the two forms
+ * against a recorded sweep at a seat displaced 115 mm in the screen plane:
  *
- * Why the eye term rather than a plain affine in screen space: the two differ
- * by ((g-1)/g) * (eye displacement), which on this panel is 0.63 px per mm of
- * LATERAL or VERTICAL head movement. E_proj has no z term, so head movement in
- * DEPTH costs nothing and the two forms agree exactly. See the task-13b report:
- * this is the one part of the model the recorded sweeps cannot yet confirm.
+ *     raw 253 px    form H 69 px    form S 53 px
+ *
+ * so the scale centre is NOT the eye, and form H actively degrades once the
+ * head moves. Over the four recorded sweeps that pass the guards below, form S
+ * holds out at a 48 px median against form H's 52 px, with a tighter range.
+ * See the task-13b report, form S section, before reinstating an eye term.
+ *
+ * The consequence, and the reason the eye position is still recorded in every
+ * sweep and in the correction file: the fit is now PER SEATING POSITION rather
+ * than per user, and it degrades at about 0.63 px per mm of head movement in
+ * the screen plane. Depth costs nothing either way.
  *
  * This lives in proto.c so Plan 2's OBS filter plugin shares one implementation
  * with the CLI. It allocates nothing, performs no I/O, and is safe to call at
  * 33.2 Hz from a render path. */
 
-#define GZ_CORRECTION_VERSION 1
+/* Bumped from 1 when form H was replaced. A form H file and a form S file carry
+ * the same key names with DIFFERENT meanings: form H's b is measured relative
+ * to the eye projection, form S's is absolute, so reading one as the other
+ * applies a wrong offset that nothing downstream could detect. The version gate
+ * refuses every form H file outright, and `form` below is the second lock. */
+#define GZ_CORRECTION_VERSION 2
+
+/* The only form this build applies. Stored explicitly so a future build that
+ * reintroduces an eye term cannot silently misread this one, and so an unknown
+ * value is refused rather than assumed. */
+#define GZ_CORR_FORM_STATIC 1
 
 /* Sanity bounds a fit must satisfy before it is stored or used. Measured
  * isotropy is 0.9991 to 1.0148 and the gain ran 1.1562 to 1.1828 across the six
@@ -313,18 +332,35 @@ unsigned gz_rect_diff(struct gz_rect got, struct gz_rect want,
 #define GZ_CORR_G_MAX   1.30
 #define GZ_CORR_ISO_TOL 0.05
 
+/* What form S costs per mm of head movement in the screen plane away from the
+ * seat it was fitted at: ((g-1)/g) converted to pixels, 0.145 * 2560/590.42 at
+ * the measured g. Depth costs nothing. Reported so an operator can tell a
+ * degraded run from a broken one. */
+#define GZ_CORR_DEGRADE_PX_PER_MM 0.63
+
 struct gz_correction {
     double gx, gy;          /* gains, normalised units */
-    double bx, by;          /* offsets, normalised units */
+    double bx, by;          /* offsets, normalised units, ABSOLUTE not eye-relative */
     struct gz_rect area;    /* the display area this fit is valid for */
+    /* The seat this fit belongs to, as the eye's projection in normalised
+     * display coordinates. Required, not optional: form S is scoped per seating
+     * position, so a file that does not say which position is not usable
+     * evidence. Not on the transform path; it is what lets a later sweep report
+     * how far the head has moved and what that costs. */
+    double eye_proj[2];
+    int    form;            /* GZ_CORR_FORM_STATIC; anything else is refused */
     int    valid;           /* 0 until loaded or fitted */
 };
 
-/* The eye midpoint needs one piece of session state, so it cannot live in the
- * const gz_correction: with one eye tracked the midpoint is reconstructed by
- * offsetting the valid eye by half the LAST KNOWN L-to-R vector. Using the
- * single eye instead jumps E_proj by 32.78 mm and the corrected gaze by
- * 21.7 px. Reconstruction is safe because the measured IPD is stable to
+/* Not used by the correction any more, and kept because the sweep still records
+ * an eye position for every point: spec 5.6 wants the seating position the fit
+ * was taken at written into the file, and wants the head-aware question
+ * re-openable from recorded data rather than from another hardware session.
+ *
+ * With one eye tracked the midpoint is reconstructed by offsetting the valid
+ * eye by half the LAST KNOWN L-to-R vector, which needs session state, hence
+ * the separate struct. Using the single eye instead moves the midpoint by
+ * 32.78 mm. Reconstruction is safe because the measured IPD is stable to
  * sd 0.19 mm over 376 frames. */
 struct gz_eye_state {
     double lr_mm[3];        /* last observed eye_origin_R - eye_origin_L */
@@ -347,25 +383,27 @@ int gz_sample_eye_mid(struct gz_eye_state *e, const struct gz_gaze_sample *s,
  * display coordinates. Normalised y grows DOWNWARD while tracker y grows
  * upward, which is the sign this inverts and the easiest thing to get wrong.
  *
- * Assumes the plane is untilted, as the measured area is (2.15 +/- 1.95 deg,
- * consistent with zero). A tilted area would want the eye projected along the
- * plane normal instead, but the load-time gate pins the applied area to the
- * fitted one, so any such error is identical at fit and at apply time and
- * cancels rather than accumulating. */
+ * No longer on the correction path. It is how a sweep records where the head
+ * was, and how far a later sweep has moved from the seat a fit was taken at,
+ * which is what predicts form S's degradation. */
 void gz_eye_proj(struct gz_rect area, const double eye_mm[3], double out[2]);
 
-/* The transform itself, on an eye projection and a reported point the caller
- * already has. Exposed so the offline scoring in calibrate.c uses the same
- * spelling as the live path rather than a second copy of the algebra.
+/* The transform itself, on a reported point the caller already has. Exposed so
+ * the offline scoring in calibrate.c uses the same spelling as the live path
+ * rather than a second copy of the algebra.
  *
  * Divides by the gains without checking them, because every path that reaches
  * it has already been through gz_correction_check or the fit's own bounds. */
-void gz_correct_point(const struct gz_correction *c, const double eye_proj[2],
+void gz_correct_point(const struct gz_correction *c,
                       const double reported[2], double out[2]);
 
 /* Applies the correction. Returns 1 and writes out[2] on success, 0 if the
- * sample cannot be corrected, in which case out is untouched. */
-int gz_gaze_correct(const struct gz_correction *c, struct gz_eye_state *e,
+ * sample cannot be corrected, in which case out is untouched.
+ *
+ * Form S needs no eye position, so this takes no session state. A sample with
+ * neither eye tracked is still refused: its gaze point is not a measurement of
+ * anything, whatever the correction would do with it. */
+int gz_gaze_correct(const struct gz_correction *c,
                     const struct gz_gaze_sample *s, double out[2]);
 
 /* The invariants above. Returns 1 when the parameters are usable. */
@@ -381,12 +419,16 @@ int gz_correction_check(const struct gz_correction *c);
  * ("1.1713") stops at the dot and yields 1.0: a silently wrong gain that still
  * passes every bounds check.
  *
- * BOUNDS is reported separately from MALFORMED because only the first has
- * anything worth printing: the parsed numbers are written to out with valid
- * left at 0, so the caller can name the gain it refused. */
+ * Three failures rather than one, because each has a different remedy and the
+ * caller can only say so if it can tell them apart. BOUNDS writes the parsed
+ * numbers to out with valid left at 0, so the caller can name the gain it
+ * refused. STALE is a well-formed file of a version or form this build does not
+ * apply, which is what every correction.conf written before spec test 5.3 chose
+ * form S now is. */
 #define GZ_CORR_PARSE_OK        1
 #define GZ_CORR_PARSE_MALFORMED 0
 #define GZ_CORR_PARSE_BOUNDS    (-1)
+#define GZ_CORR_PARSE_STALE     (-2)
 
 int    gz_correction_parse(const char *buf, size_t len, struct gz_correction *out);
 size_t gz_correction_format(const struct gz_correction *c, char *buf, size_t cap);

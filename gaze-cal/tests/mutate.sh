@@ -727,16 +727,46 @@ run_mutation "eye projection ignores the area origin" proto.c \
 # The whole point of the stage: dividing by g removes the gain, multiplying
 # doubles it.
 run_mutation "correction multiplies by the gain" proto.c \
-    "    v[0] = (reported[0] + eye_proj[0] * (c->gx - 1.0) - c->bx) / c->gx;" \
-    "    v[0] = (reported[0] + eye_proj[0] * (c->gx - 1.0) - c->bx) * c->gx;"
-
-run_mutation "correction drops the eye term" proto.c \
-    "    v[1] = (reported[1] + eye_proj[1] * (c->gy - 1.0) - c->by) / c->gy;" \
-    "    v[1] = (reported[1] - c->by) / c->gy;"
+    "    v[0] = (reported[0] - c->bx) / c->gx;" \
+    "    v[0] = (reported[0] - c->bx) * c->gx;"
 
 run_mutation "correction ignores the offset" proto.c \
-    "    v[1] = (reported[1] + eye_proj[1] * (c->gy - 1.0) - c->by) / c->gy;" \
-    "    v[1] = (reported[1] + eye_proj[1] * (c->gy - 1.0)) / c->gy;"
+    "    v[1] = (reported[1] - c->by) / c->gy;" \
+    "    v[1] = reported[1] / c->gy;"
+
+# The measured decision. An eye term here is form H, which spec test 5.3 scored
+# at 69 px against form S's 53 at a displaced seat.
+run_mutation "an eye term reintroduced on the correction path" proto.c \
+    "    if (!gz_sample_any_eye_valid(s)) return 0;
+
+    gz_correct_point(c, s->gaze_point_2d_norm, out);" \
+    "    if (!gz_sample_any_eye_valid(s)) return 0;
+
+    double eye[3], ep[2];
+    struct gz_eye_state e_;
+    gz_eye_state_init(&e_);
+    if (!gz_sample_eye_mid(&e_, s, eye)) return 0;
+    gz_eye_proj(c->area, eye, ep);
+    double r_[2] = { s->gaze_point_2d_norm[0] + ep[0] * (c->gx - 1.0),
+                     s->gaze_point_2d_norm[1] + ep[1] * (c->gy - 1.0) };
+    gz_correct_point(c, r_, out);"
+
+run_mutation "an eyeless frame corrected anyway" proto.c \
+    "    if (!gz_sample_any_eye_valid(s)) return 0;" "    ;"
+
+run_mutation "the form field not checked" proto.c \
+    "    if (c->form != GZ_CORR_FORM_STATIC) return 0;" "    ;"
+
+run_mutation "a form H file accepted by version" proto.c \
+    "    if (version != (double)GZ_CORRECTION_VERSION) return GZ_CORR_PARSE_STALE;" "    ;"
+
+run_mutation "an unknown form accepted on parse" proto.c \
+    "    if ((seen & (1u << CK_FORM)) && form != (double)GZ_CORR_FORM_STATIC)
+        return GZ_CORR_PARSE_STALE;" "    ;"
+
+run_mutation "a stale file reported as malformed" proto.c \
+    "    if (version != (double)GZ_CORRECTION_VERSION) return GZ_CORR_PARSE_STALE;" \
+    "    if (version != (double)GZ_CORRECTION_VERSION) return GZ_CORR_PARSE_MALFORMED;"
 
 run_mutation "an unfitted correction is applied anyway" proto.c \
     "    if (!c->valid) return 0;" "    ;"
@@ -796,8 +826,6 @@ run_mutation "parse accepts a missing key" proto.c \
 run_mutation "parse accepts a repeated key" proto.c \
     "        if (seen & (1u << idx)) return GZ_CORR_PARSE_MALFORMED;" "        ;"
 
-run_mutation "parse ignores the format version" proto.c \
-    "    if (version != (double)GZ_CORRECTION_VERSION) return GZ_CORR_PARSE_MALFORMED;" "    ;"
 
 run_mutation "parse accepts junk after a number" proto.c \
     "        if (p != buf + le) return GZ_CORR_PARSE_MALFORMED;  /* trailing junk */" \
@@ -827,9 +855,13 @@ TEST_SRCS="src/calibrate.c src/display.c src/client.c src/proto.c"
 
 # do-not #3. The head drifts during a sweep; averaging folds that drift into
 # the parameters themselves.
-run_mutation "fit uses one eye position for the whole sweep" calibrate.c \
-    "        gz_eye_proj(area, in[i].eye_mm, ep);" \
-    "        gz_eye_proj(area, in[0].eye_mm, ep);"
+# Form S regresses reported on target. Reintroducing the eye is form H.
+run_mutation "the fit made head-aware again" calibrate.c \
+    "        vx[i] = in[i].target[0];" \
+    "        { double ep_[2]; gz_eye_proj(area, in[i].eye_mm, ep_); vx[i] = in[i].target[0] - ep_[0]; }"
+
+run_mutation "the fitted seat not recorded" calibrate.c \
+    "    out->eye_proj[0] = rep->eye_proj[0];" "    out->eye_proj[0] = 0.0;"
 
 run_mutation "fit regresses the wrong way round" calibrate.c \
     "        if (!ols(vx, ux, use, n, &gx, &bx)) return GZ_FIT_ERR_FLAT;" \

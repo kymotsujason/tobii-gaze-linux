@@ -1127,23 +1127,20 @@ static struct gz_rect corr_area(void) {
     return r;
 }
 
-/* Builds a sweep from the forward model, so the fit has a known answer:
- * reported = E_proj + g*(target - E_proj) + b. `drift` moves the head between
- * points, which is what separates a per-point eye from a per-sweep average. */
+/* Builds a sweep from the form S forward model, so the fit has a known answer:
+ * reported = g * target + b, with no eye term anywhere. `drift_mm` still moves
+ * the head between points, because the fit must be INDIFFERENT to that now and
+ * the test below pins it. */
 static void synth_sweep(struct gz_fit_input *in, double gx, double gy,
                         double bx, double by, double drift_mm) {
-    struct gz_rect a = corr_area();
     for (int i = 0; i < GZ_CAL_POINTS; i++) {
         in[i].target[0] = GZ_CAL_PTS[i][0];
         in[i].target[1] = GZ_CAL_PTS[i][1];
         in[i].eye_mm[0] = 18.42 + drift_mm * i;
         in[i].eye_mm[1] = 70.61;
         in[i].eye_mm[2] = 598.0;
-
-        double ep[2];
-        gz_eye_proj(a, in[i].eye_mm, ep);
-        in[i].reported[0] = ep[0] + gx * (in[i].target[0] - ep[0]) + bx;
-        in[i].reported[1] = ep[1] + gy * (in[i].target[1] - ep[1]) + by;
+        in[i].reported[0] = gx * in[i].target[0] + bx;
+        in[i].reported[1] = gy * in[i].target[1] + by;
     }
 }
 
@@ -1153,57 +1150,56 @@ static void test_fit_recovers_a_synthetic_gain(void) {
      * tracker y grows upward: a flipped E_proj still yields a plausible gain
      * and a wrong offset. */
     struct gz_fit_input in[GZ_CAL_POINTS];
-    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 0.0);
+    synth_sweep(in, 1.1695, 1.1875, -0.1034, -0.2479, 0.0);
 
     struct gz_correction c;
     struct gz_fit_report rep;
     assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_OK);
     assert(c.valid == 1);
-    assert(fabs(c.gx - 1.1713) < 1e-9);
-    assert(fabs(c.gy - 1.1624) < 1e-9);
-    assert(fabs(c.bx - -0.0043) < 1e-9);
-    assert(fabs(c.by - -0.1487) < 1e-9);
+    assert(fabs(c.gx - 1.1695) < 1e-9);
+    assert(fabs(c.gy - 1.1875) < 1e-9);
+    assert(fabs(c.bx - -0.1034) < 1e-9);
+    assert(fabs(c.by - -0.2479) < 1e-9);
     assert(rep.n_used == GZ_CAL_POINTS && rep.n_rejected == 0);
     assert(rep.median_resid_mm < 1e-9 && rep.worst_resid_mm < 1e-9);
     assert(fabs(rep.eye_z_mm - 598.0) < 1e-9);
     assert(gz_rect_diff(c.area, corr_area(), 1e-9, 1e-9) == 0);
 }
 
-static void test_fit_uses_each_points_own_eye(void) {
-    /* Spec do-not #3. The head drifts 5 mm per point here, 40 mm over the
-     * sweep. Fitting against each point's own eye recovers the gain exactly;
-     * a per-sweep average would not, and the error it leaves is the same
-     * 0.63 px per mm that separates the head-aware form from a plain affine. */
-    struct gz_fit_input in[GZ_CAL_POINTS];
-    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 5.0);
+static void test_fit_ignores_the_eye_entirely(void) {
+    /* The measured decision, at the fit end. Spec test 5.3 scored the
+     * eye-relative form against this one at a seat displaced 115 mm and form H
+     * lost, 69 px against 53, so the eye is out of the model. The same sweep
+     * with the head somewhere else must therefore fit to the same numbers,
+     * bit for bit. */
+    struct gz_fit_input still[GZ_CAL_POINTS], drifting[GZ_CAL_POINTS];
+    synth_sweep(still, 1.1695, 1.1875, -0.1034, -0.2479, 0.0);
+    synth_sweep(drifting, 1.1695, 1.1875, -0.1034, -0.2479, 25.0);
 
-    struct gz_correction c;
-    struct gz_fit_report rep;
-    assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_OK);
-    assert(fabs(c.gx - 1.1713) < 1e-9);
-    assert(fabs(c.bx - -0.0043) < 1e-9);
-    assert(rep.worst_resid_mm < 1e-9);
+    struct gz_correction a, b;
+    struct gz_fit_report ra, rb;
+    assert(gz_correction_fit(still, GZ_CAL_POINTS, corr_area(), &a, &ra) == GZ_FIT_OK);
+    assert(gz_correction_fit(drifting, GZ_CAL_POINTS, corr_area(), &b, &rb) == GZ_FIT_OK);
+    assert(a.gx == b.gx && a.gy == b.gy);
+    assert(a.bx == b.bx && a.by == b.by);
+    assert(fabs(a.gx - 1.1695) < 1e-9);
+    assert(fabs(a.by - -0.2479) < 1e-9);
 
-    /* And the same data fitted against the mean eye instead does NOT recover
-     * it, which is what makes the previous assertion worth making. */
-    struct gz_fit_input avg[GZ_CAL_POINTS];
-    double mx = 0;
-    for (int i = 0; i < GZ_CAL_POINTS; i++) mx += in[i].eye_mm[0];
-    mx /= GZ_CAL_POINTS;
-    for (int i = 0; i < GZ_CAL_POINTS; i++) {
-        avg[i] = in[i];
-        avg[i].eye_mm[0] = mx;
-    }
-    struct gz_correction c2;
-    struct gz_fit_report rep2;
-    assert(gz_correction_fit(avg, GZ_CAL_POINTS, corr_area(), &c2, &rep2) == GZ_FIT_OK);
-    assert(rep2.worst_resid_mm > 0.5);
+    /* What the eye IS still for: the seat the fit belongs to, which form S is
+     * scoped by and which spec 5.6 requires the file to record. The two sweeps
+     * sat at different seats and must say so. */
+    assert(a.form == GZ_CORR_FORM_STATIC);
+    assert(fabs(a.eye_proj[0] - (18.42 + 295.21) / 590.42) < 1e-9);
+    assert(b.eye_proj[0] > a.eye_proj[0]);
+    /* 25 mm per point over nine points, so the mean sits 100 mm to the right. */
+    assert(fabs((b.eye_proj[0] - a.eye_proj[0]) * 590.42 - 100.0) < 1e-6);
+    assert(fabs(a.eye_proj[1] - ra.eye_proj[1]) < 1e-12);
 }
 
 static void test_fit_drops_one_outlier_and_refits(void) {
     struct gz_fit_input in[GZ_CAL_POINTS];
-    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 0.0);
-    /* One point where the eye was somewhere else entirely. */
+    synth_sweep(in, 1.1695, 1.1875, -0.1034, -0.2479, 0.0);
+    /* One point the eye was not actually on. */
     in[4].reported[0] += 0.15;
 
     struct gz_correction c;
@@ -1213,8 +1209,8 @@ static void test_fit_drops_one_outlier_and_refits(void) {
     assert(rep.n_used == GZ_CAL_POINTS - 1);
     /* The refit lands back on the truth, which it cannot do if the outlier is
      * still carrying weight. */
-    assert(fabs(c.gx - 1.1713) < 1e-9);
-    assert(fabs(c.gy - 1.1624) < 1e-9);
+    assert(fabs(c.gx - 1.1695) < 1e-9);
+    assert(fabs(c.gy - 1.1875) < 1e-9);
     /* The rejected point still has a residual recorded, so a human can see how
      * far out it was rather than being told a number vanished. */
     assert(rep.resid_mm[4] > 10.0);
@@ -1227,7 +1223,7 @@ static void test_a_near_perfect_sweep_rejects_nothing(void) {
      * bit-identical to the fit. Without the guard this sweep loses points, or
      * loses more than one and is refused outright. */
     struct gz_fit_input in[GZ_CAL_POINTS];
-    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 0.0);
+    synth_sweep(in, 1.1695, 1.1875, -0.1034, -0.2479, 0.0);
     /* One point off by a nanometre of normalised coordinate. That leaves it
      * eight times the median residual, which the 3x rule would reject, while
      * the median itself is 56 picometres. */
@@ -1240,7 +1236,7 @@ static void test_a_near_perfect_sweep_rejects_nothing(void) {
     assert(rep.n_used == GZ_CAL_POINTS);
     assert(rep.median_resid_mm > 0.0 && rep.median_resid_mm < 1e-6);
     assert(rep.worst_resid_mm > 3.0 * rep.median_resid_mm);
-    assert(fabs(c.gx - 1.1713) < 1e-6);
+    assert(fabs(c.gx - 1.1695) < 1e-6);
 }
 
 static void test_fit_refuses_two_outliers(void) {
@@ -1251,7 +1247,7 @@ static void test_fit_refuses_two_outliers(void) {
      * is untouched and only the intercept moves. That is the shape where the
      * 3x-median rule sees both of them. */
     struct gz_fit_input in[GZ_CAL_POINTS];
-    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 0.0);
+    synth_sweep(in, 1.1695, 1.1875, -0.1034, -0.2479, 0.0);
     in[1].reported[0] += 0.20;
     in[7].reported[0] += 0.20;
 
@@ -1263,31 +1259,42 @@ static void test_fit_refuses_two_outliers(void) {
     assert(rep.rejected[1] == 1 && rep.rejected[7] == 1);
 }
 
-static void test_a_second_outlier_on_the_other_axis_still_refuses(void) {
-    /* Worth pinning because it does NOT come back as an outlier. The rule the
-     * spec gives scores one residual per point over both axes and rejects once,
-     * so a y-displacement that the y regression partly absorbs can stay under
-     * 3x the median while dragging gy down with it. Here gy lands near 1.095.
+static void test_a_second_outlier_on_the_other_axis_is_absorbed(void) {
+    /* A KNOWN HOLE, pinned so it cannot be discovered again by accident.
      *
-     * The ISOTROPY invariant is what catches it: 1.1713 against 1.0951 is 7.0
-     * percent apart, past the 5 percent the six recorded sweeps never came
-     * close to. Nothing is stored either way, but a reviewer should know the
-     * outlier rule alone is not the guard. With nine points and a single
-     * rejection round it is a coarse filter, and the measured envelope in
-     * gz_correction_check is the load-bearing one. */
+     * The spec's rule scores one residual per point over both axes and rejects
+     * once. A second bad point displaced on the OTHER axis is partly absorbed
+     * by that axis's regression, so it stays under 3x the median: here it drags
+     * gy from 1.1875 to 1.1202, a 5.7 percent gain error, and the fit is
+     * ACCEPTED. The isotropy invariant does not catch it either, because
+     * pulling gy down moves it TOWARD gx, to a ratio of 1.044.
+     *
+     * The obvious fix, a per-axis 3x rule, was measured against the four real
+     * sweeps and would have refused fit#9 and lateral#1, the two that actually
+     * produced working corrections. So the rule is left as specified and the
+     * damage is bounded instead: a verify sweep run against a fit this bad
+     * reads 20 px median and 54 px worst, with the error concentrated in one
+     * row of the per-point table, which is where a human would see it.
+     *
+     * If this is ever closed properly, the answer is more calibration points,
+     * not a tighter rule on nine. */
     struct gz_fit_input in[GZ_CAL_POINTS];
-    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 0.0);
+    synth_sweep(in, 1.1695, 1.1875, -0.1034, -0.2479, 0.0);
     in[2].reported[0] += 0.15;
     in[6].reported[1] -= 0.15;
 
     struct gz_correction c;
     struct gz_fit_report rep;
     int rc = gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep);
-    assert(rc == GZ_FIT_ERR_BOUNDS);
-    assert(c.valid == 0);
-    assert(c.gy >= GZ_CORR_G_MIN && c.gy <= GZ_CORR_G_MAX);   /* in range, but */
-    assert(fabs(c.gx / c.gy - 1.0) > GZ_CORR_ISO_TOL);         /* not isotropic */
-    assert(fabs(c.gy - 1.0951) < 1e-3);
+
+    assert(rc == GZ_FIT_OK);                       /* accepted, and that is the hole */
+    assert(rep.n_rejected == 1 && rep.rejected[2] == 1);
+    assert(fabs(c.gx - 1.1695) < 1e-9);            /* the x axis is untouched */
+    assert(fabs(c.gy - 1.1202) < 1e-3);            /* the y axis is 5.7 percent out */
+    assert(fabs(c.gx / c.gy - 1.0) < GZ_CORR_ISO_TOL);   /* and passes isotropy */
+    /* The residual the human is shown looks healthy, which is the point: it is
+     * about 20 px, so nothing in the fit output flags this. */
+    assert(rep.median_resid_mm / (590.42 / 2560.0) < 30.0);
 }
 
 static void test_fit_refuses_a_gain_outside_the_measured_envelope(void) {
@@ -1341,7 +1348,7 @@ static void test_fit_residual_is_the_corrected_error(void) {
     /* Not the regression residual: the two differ by the factor g, and the
      * acceptance test in the spec measures the first. */
     struct gz_fit_input in[GZ_CAL_POINTS];
-    synth_sweep(in, 1.1713, 1.1624, -0.0043, -0.1487, 0.0);
+    synth_sweep(in, 1.1695, 1.1875, -0.1034, -0.2479, 0.0);
 
     /* Displace the whole middle COLUMN in reported x by d. All three share a
      * target x, so the slope is untouched and the intercept absorbs d/3,
@@ -1357,10 +1364,10 @@ static void test_fit_residual_is_the_corrected_error(void) {
     struct gz_fit_report rep;
     assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_OK);
     assert(rep.n_rejected == 0);
-    assert(fabs(c.gx - 1.1713) < 1e-9);
+    assert(fabs(c.gx - 1.1695) < 1e-9);
 
     double as_reported = (2.0 * d / 3.0) * 590.42;          /* 11.81 mm */
-    double as_corrected = as_reported / 1.1713;             /* 10.08 mm */
+    double as_corrected = as_reported / 1.1695;             /* 10.10 mm */
     assert(fabs(rep.worst_resid_mm - as_corrected) < 1e-6);
     assert(fabs(rep.worst_resid_mm - as_reported) > 1.0);
     assert(fabs(rep.median_resid_mm - as_corrected / 2.0) < 1e-6);
@@ -1471,8 +1478,11 @@ static void test_correction_file_round_trips(void) {
 
     struct gz_correction c;
     memset(&c, 0, sizeof c);
-    c.gx = 1.1713; c.gy = 1.1624; c.bx = -0.0043; c.by = -0.1487;
+    c.gx = 1.1695; c.gy = 1.1875; c.bx = -0.1034; c.by = -0.2479;
     c.area = corr_area();
+    c.form = GZ_CORR_FORM_STATIC;
+    c.eye_proj[0] = 0.5265;
+    c.eye_proj[1] = 0.9818;
     c.valid = 1;
 
     struct gz_fit_report rep;
@@ -1505,6 +1515,11 @@ static void test_correction_file_round_trips(void) {
     assert(strstr(text, "fit_median_resid_px=36.9") != NULL);
     assert(strstr(text, "fit_worst_resid_px=74.8") != NULL);
     assert(strstr(text, "resid_mm") == NULL);
+    /* Spec 5.6: the seat the fit belongs to, and what leaving it costs. */
+    assert(strstr(text, "form=1\n") != NULL);
+    assert(strstr(text, "fit_eye_proj_x=0.5265\n") != NULL);
+    assert(strstr(text, "degrade_px_per_mm=") != NULL);
+    assert(fabs(back.eye_proj[1] - 0.9818) < 1e-9);
 
     char tmp[512];
     snprintf(tmp, sizeof tmp, "%s.tmp", p);
@@ -1521,8 +1536,11 @@ static void test_correction_load_gates_on_the_display_area(void) {
 
     struct gz_correction c;
     memset(&c, 0, sizeof c);
-    c.gx = 1.1713; c.gy = 1.1624; c.bx = -0.0043; c.by = -0.1487;
+    c.gx = 1.1695; c.gy = 1.1875; c.bx = -0.1034; c.by = -0.2479;
     c.area = corr_area();
+    c.form = GZ_CORR_FORM_STATIC;
+    c.eye_proj[0] = 0.5265;
+    c.eye_proj[1] = 0.9818;
     c.valid = 1;
     assert(gz_correction_save_to(p, &c, NULL, 598.0, 590.42 / 2560.0) == 0);
 
@@ -1575,7 +1593,20 @@ static void test_correction_load_separates_absent_from_broken(void) {
      * indistinguishable from a calibration. */
     f = fopen(p, "wb");
     assert(f != NULL);
-    fputs("version=1\ngx=2.5\ngy=2.5\nbx=0\nby=0\n"
+    fputs("version=2\nform=1\ngx=2.5\ngy=2.5\nbx=0\nby=0\n"
+          "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n"
+          "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n"
+          "fit_eye_proj_x=0.5265\nfit_eye_proj_y=0.9818\n", f);
+    fclose(f);
+    assert(gz_correction_load_from(p, corr_area(), &back) == -1);
+
+    /* The correction.conf that shipped under form H. Its bx and by are
+     * eye-relative, so loading it here would be wrong by about 90 px, and the
+     * version gate is what stops that. */
+    f = fopen(p, "wb");
+    assert(f != NULL);
+    fputs("version=1\ngx=1.17213\ngy=1.189524978\n"
+          "bx=-0.014093408\nby=-0.0627924\n"
           "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n"
           "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n", f);
     fclose(f);
@@ -1588,9 +1619,10 @@ static void test_correction_load_separates_absent_from_broken(void) {
      * never mention that it had not seen the whole file. */
     f = fopen(p, "wb");
     assert(f != NULL);
-    fputs("version=1\ngx=1.1713\ngy=1.1624\nbx=-0.0043\nby=-0.1487\n"
+    fputs("version=2\nform=1\ngx=1.1695\ngy=1.1875\nbx=-0.1034\nby=-0.2479\n"
           "area_w_mm=590.42\narea_h_mm=333.72\narea_ox_mm=-295.21\n"
-          "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n", f);
+          "area_oy_mm=5\narea_z_mm=-7.5\narea_tilt_deg=0\n"
+          "fit_eye_proj_x=0.5265\nfit_eye_proj_y=0.9818\n", f);
     for (int i = 0; i < 4000; i++) fputs("# padding that a truncation cannot corrupt\n", f);
     fclose(f);
     assert(gz_correction_load_from(p, corr_area(), &back) == -1);
@@ -1631,11 +1663,11 @@ int main(void) {
     test_apply_reports_a_rejection();
 
     test_fit_recovers_a_synthetic_gain();
-    test_fit_uses_each_points_own_eye();
+    test_fit_ignores_the_eye_entirely();
     test_fit_drops_one_outlier_and_refits();
     test_a_near_perfect_sweep_rejects_nothing();
     test_fit_refuses_two_outliers();
-    test_a_second_outlier_on_the_other_axis_still_refuses();
+    test_a_second_outlier_on_the_other_axis_is_absorbed();
     test_fit_refuses_a_gain_outside_the_measured_envelope();
     test_fit_refuses_input_it_cannot_fit();
     test_fit_residual_is_the_corrected_error();
