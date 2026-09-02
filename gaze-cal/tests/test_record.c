@@ -15,9 +15,12 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <assert.h>
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../src/record.h"
 
@@ -71,6 +74,16 @@ static void base_sample(struct gz_gaze_sample *s) {
     s->gaze_point_2d_norm[1] = 0.425;
     s->gaze_point_2d_unfiltered[0] = 0.56;
     s->gaze_point_2d_unfiltered[1] = 0.43;
+    /* Tracker millimetres. Distinct on every axis so a row that reads the
+     * wrong member cannot accidentally match, and a plausible seat: the eyes
+     * about 65 mm apart and about 675 mm out, which is where the measured
+     * sweeps sat. */
+    s->eye_origin_L_mm[0] = -32.780;
+    s->eye_origin_L_mm[1] = 12.500;
+    s->eye_origin_L_mm[2] = -675.250;
+    s->eye_origin_R_mm[0] = 32.560;
+    s->eye_origin_R_mm[1] = 13.125;
+    s->eye_origin_R_mm[2] = -674.500;
 }
 
 /* gx=1.2, gy=1.1, bx=0.01, by=-0.02, the numbers Task 15's expected values
@@ -106,7 +119,8 @@ static void test_header_names_the_brief_columns_then_the_corrected_six(void) {
         "combined_x", "combined_y",
         "unfiltered_x", "unfiltered_y",
         "pupil_L", "pupil_R",
-        "corr_lx", "corr_ly", "corr_rx", "corr_ry", "corr_cx", "corr_cy"
+        "corr_lx", "corr_ly", "corr_rx", "corr_ry", "corr_cx", "corr_cy",
+        "eye_lx", "eye_ly", "eye_lz", "eye_rx", "eye_ry", "eye_rz"
     };
     assert(n == (int)(sizeof want / sizeof want[0]));
     for (int i = 0; i < n; i++) assert(strcmp(f[i], want[i]) == 0);
@@ -153,7 +167,8 @@ static void test_a_valid_sample_yields_the_hand_computed_row(void) {
         "123456789,42,1000,4194303,0,0,"
         "0.500000,0.400000,0.600000,0.450000,0.550000,0.425000,"
         "0.560000,0.430000,3.210,4.560,"
-        "0.408333,0.381818,0.491667,0.427273,0.450000,0.404545\n";
+        "0.408333,0.381818,0.491667,0.427273,0.450000,0.404545,"
+        "-32.780,12.500,-675.250,32.560,13.125,-674.500\n";
     assert(strcmp(row, want) == 0);
 }
 
@@ -171,7 +186,7 @@ static void test_the_corrected_columns_are_not_the_raw_ones(void) {
 
     char *f[MAX_FIELDS];
     int n = split_row(row, f);
-    assert(n == 22);
+    assert(n == 28);
     for (int i = 0; i < 6; i++) assert(strcmp(f[6 + i], f[16 + i]) != 0);
 }
 
@@ -192,7 +207,7 @@ static void test_the_identity_correction_reproduces_each_point(void) {
     assert(gz_record_row(row, sizeof row, &s, &c, 1) > 0);
 
     char *f[MAX_FIELDS];
-    assert(split_row(row, f) == 22);
+    assert(split_row(row, f) == 28);
     assert(strcmp(f[16], "0.500000") == 0);   /* corr_lx == lx */
     assert(strcmp(f[17], "0.400000") == 0);
     assert(strcmp(f[18], "0.600000") == 0);   /* corr_rx == rx */
@@ -214,7 +229,7 @@ static void test_an_invalid_left_eye_nans_only_its_own_columns(void) {
     assert(gz_record_row(row, sizeof row, &s, &c, 7) > 0);
 
     char *f[MAX_FIELDS];
-    assert(split_row(row, f) == 22);
+    assert(split_row(row, f) == 28);
     assert(strcmp(f[16], "nan") == 0);        /* corr_lx */
     assert(strcmp(f[17], "nan") == 0);        /* corr_ly */
     assert(strcmp(f[18], "0.491667") == 0);   /* corr_rx, unaffected */
@@ -235,7 +250,7 @@ static void test_an_invalid_right_eye_nans_only_its_own_columns(void) {
     assert(gz_record_row(row, sizeof row, &s, &c, 7) > 0);
 
     char *f[MAX_FIELDS];
-    assert(split_row(row, f) == 22);
+    assert(split_row(row, f) == 28);
     assert(strcmp(f[16], "0.408333") == 0);
     assert(strcmp(f[17], "0.381818") == 0);
     assert(strcmp(f[18], "nan") == 0);
@@ -257,7 +272,7 @@ static void test_neither_eye_valid_nans_all_six(void) {
     assert(gz_record_row(row, sizeof row, &s, &c, 7) > 0);
 
     char *f[MAX_FIELDS];
-    assert(split_row(row, f) == 22);
+    assert(split_row(row, f) == 28);
     for (int i = 16; i < 22; i++) assert(strcmp(f[i], "nan") == 0);
 }
 
@@ -275,7 +290,7 @@ static void test_the_raw_columns_survive_an_invalid_sample(void) {
     assert(gz_record_row(row, sizeof row, &s, &c, 7) > 0);
 
     char *f[MAX_FIELDS];
-    assert(split_row(row, f) == 22);
+    assert(split_row(row, f) == 28);
     assert(strcmp(f[4], "1") == 0);           /* validity_L, recorded as sent */
     assert(strcmp(f[5], "1") == 0);
     assert(strcmp(f[6], "0.500000") == 0);    /* lx */
@@ -293,9 +308,11 @@ static void test_a_null_correction_nans_all_six(void) {
     assert(gz_record_row(row, sizeof row, &s, NULL, 99) > 0);
 
     char *f[MAX_FIELDS];
-    assert(split_row(row, f) == 22);
+    assert(split_row(row, f) == 28);
     for (int i = 0; i < 16; i++) assert(strcmp(f[i], "nan") != 0);
     for (int i = 16; i < 22; i++) assert(strcmp(f[i], "nan") == 0);
+    /* The eye origins are raw, so no correction is needed to write them. */
+    for (int i = 22; i < 28; i++) assert(strcmp(f[i], "nan") != 0);
 }
 
 /* A struct that was zeroed and never loaded has valid == 0 and gains of 0.0.
@@ -310,7 +327,7 @@ static void test_an_unloaded_correction_is_treated_as_none(void) {
     assert(gz_record_row(row, sizeof row, &s, &c, 99) > 0);
 
     char *f[MAX_FIELDS];
-    assert(split_row(row, f) == 22);
+    assert(split_row(row, f) == 28);
     for (int i = 16; i < 22; i++) assert(strcmp(f[i], "nan") == 0);
 }
 
@@ -371,6 +388,10 @@ static void absurd_sample(struct gz_gaze_sample *s) {
         s->gaze_point_2d_norm[i] = 1e300;
         s->gaze_point_2d_unfiltered[i] = 1e300;
     }
+    for (int i = 0; i < 3; i++) {
+        s->eye_origin_L_mm[i] = 1e300;
+        s->eye_origin_R_mm[i] = 1e300;
+    }
 }
 
 static void test_an_absurd_field_is_refused_rather_than_truncated(void) {
@@ -429,8 +450,237 @@ static void test_a_nan_from_the_device_still_produces_a_full_row(void) {
     assert(gz_record_row(row, sizeof row, &s, NULL, 1) > 0);
 
     char *f[MAX_FIELDS];
-    assert(split_row(row, f) == 22);
+    assert(split_row(row, f) == 28);
     assert(strcmp(f[10], "nan") == 0 || strcmp(f[10], "-nan") == 0);
+}
+
+/* ---------- the eye origins ---------- */
+
+/* Form S is scoped per seating position and costs about
+ * GZ_CORR_DEGRADE_PX_PER_MM per mm of head movement in the screen plane, so
+ * where the head was is the one thing a later analysis can't recover from a
+ * trace that omits it. Tracker millimetres, uncorrected, as the device sent
+ * them. */
+static void test_the_eye_origins_are_written_in_tracker_mm(void) {
+    struct gz_gaze_sample s;
+    struct gz_correction c;
+    base_sample(&s);
+    base_correction(&c);
+
+    char row[GZ_RECORD_ROW_MAX];
+    assert(gz_record_row(row, sizeof row, &s, &c, 1) > 0);
+
+    char *f[MAX_FIELDS];
+    assert(split_row(row, f) == 28);
+    assert(strcmp(f[22], "-32.780") == 0);    /* eye_lx */
+    assert(strcmp(f[23], "12.500") == 0);     /* eye_ly */
+    assert(strcmp(f[24], "-675.250") == 0);   /* eye_lz */
+    assert(strcmp(f[25], "32.560") == 0);     /* eye_rx */
+    assert(strcmp(f[26], "13.125") == 0);     /* eye_ry */
+    assert(strcmp(f[27], "-674.500") == 0);   /* eye_rz */
+}
+
+/* The correction never touches them, so the same sample under two different
+ * fits produces the same six numbers. A gain applied here would be silently
+ * wrong, since these are millimetres rather than normalised coordinates. */
+static void test_the_eye_origins_are_not_corrected(void) {
+    struct gz_gaze_sample s;
+    struct gz_correction c;
+    base_sample(&s);
+    base_correction(&c);
+
+    char withCorr[GZ_RECORD_ROW_MAX], withNone[GZ_RECORD_ROW_MAX];
+    assert(gz_record_row(withCorr, sizeof withCorr, &s, &c, 1) > 0);
+    assert(gz_record_row(withNone, sizeof withNone, &s, NULL, 1) > 0);
+
+    char *a[MAX_FIELDS], *b[MAX_FIELDS];
+    assert(split_row(withCorr, a) == 28);
+    assert(split_row(withNone, b) == 28);
+    for (int i = 22; i < 28; i++) assert(strcmp(a[i], b[i]) == 0);
+}
+
+/* This firmware writes a plain 0.0 into the eye-origin fields on a frame with
+ * no eyes. That zero is recorded as 0.000 rather than as nan, because
+ * validity_L and validity_R already say which eye is real and substituting nan
+ * would lose the difference between "no eye" and "a value we declined to
+ * write". */
+static void test_an_eyeless_frame_writes_zero_not_nan(void) {
+    struct gz_gaze_sample s;
+    base_sample(&s);
+    s.validity_L = 1;
+    s.validity_R = 1;
+    for (int i = 0; i < 3; i++) {
+        s.eye_origin_L_mm[i] = 0.0;
+        s.eye_origin_R_mm[i] = 0.0;
+    }
+
+    char row[GZ_RECORD_ROW_MAX];
+    assert(gz_record_row(row, sizeof row, &s, NULL, 1) > 0);
+
+    char *f[MAX_FIELDS];
+    assert(split_row(row, f) == 28);
+    for (int i = 22; i < 28; i++) assert(strcmp(f[i], "0.000") == 0);
+}
+
+/* ---------- the zero-gain gate ---------- */
+
+/* gz_correct_point divides without checking, so before this the per-eye path
+ * and the combined one disagreed: a correction with valid = 1 and gx = 0 wrote
+ * inf into corr_lx while gz_gaze_correct's own zero-gain test (proto.c:408)
+ * made corr_cx come out nan. One row cannot say both. */
+/* gz_correction_parse writes the parsed numbers out with valid left at 0 when
+ * it returns GZ_CORR_PARSE_BOUNDS, so a file the loader refused reaches a
+ * caller as a struct with real-looking gains. The valid flag is the only thing
+ * standing between that and a corrected column nobody accepted. */
+static void test_a_parsed_but_refused_correction_is_not_applied(void) {
+    struct gz_gaze_sample s;
+    struct gz_correction c;
+    base_sample(&s);
+    base_correction(&c);
+    c.valid = 0;
+
+    char row[GZ_RECORD_ROW_MAX];
+    assert(gz_record_row(row, sizeof row, &s, &c, 1) > 0);
+
+    char *f[MAX_FIELDS];
+    assert(split_row(row, f) == 28);
+    for (int i = 16; i < 22; i++) assert(strcmp(f[i], "nan") == 0);
+}
+
+static void test_a_zero_gain_nans_every_corrected_column(void) {
+    struct gz_gaze_sample s;
+    struct gz_correction c;
+    base_sample(&s);
+    base_correction(&c);
+    c.gx = 0.0;
+
+    char row[GZ_RECORD_ROW_MAX];
+    assert(gz_record_row(row, sizeof row, &s, &c, 1) > 0);
+
+    char *f[MAX_FIELDS];
+    assert(split_row(row, f) == 28);
+    for (int i = 16; i < 22; i++) assert(strcmp(f[i], "nan") == 0);
+}
+
+static void test_a_zero_y_gain_nans_every_corrected_column(void) {
+    struct gz_gaze_sample s;
+    struct gz_correction c;
+    base_sample(&s);
+    base_correction(&c);
+    c.gy = 0.0;
+
+    char row[GZ_RECORD_ROW_MAX];
+    assert(gz_record_row(row, sizeof row, &s, &c, 1) > 0);
+
+    char *f[MAX_FIELDS];
+    assert(split_row(row, f) == 28);
+    for (int i = 16; i < 22; i++) assert(strcmp(f[i], "nan") == 0);
+}
+
+/* The formatter applies what it is given and does not re-run the loader's
+ * bounds. base_correction is not isotropic to GZ_CORR_ISO_TOL and so fails
+ * gz_correction_check, yet its numbers are still written: deciding which files
+ * may be used is gz_correction_load's job, and doing it twice would silently
+ * nan a fit the loader had already accepted. */
+static void test_the_formatter_does_not_re_apply_the_loaders_bounds(void) {
+    struct gz_gaze_sample s;
+    struct gz_correction c;
+    base_sample(&s);
+    base_correction(&c);
+    assert(!gz_correction_check(&c));
+
+    char row[GZ_RECORD_ROW_MAX];
+    assert(gz_record_row(row, sizeof row, &s, &c, 1) > 0);
+
+    char *f[MAX_FIELDS];
+    assert(split_row(row, f) == 28);
+    assert(strcmp(f[16], "0.408333") == 0);
+    assert(strcmp(f[20], "0.450000") == 0);
+}
+
+/* ---------- provenance beside the trace ---------- */
+
+static void write_file(const char *path, const char *text) {
+    FILE *f = fopen(path, "wb");
+    assert(f != NULL);
+    assert(fputs(text, f) != EOF);
+    assert(fclose(f) == 0);
+}
+
+static int file_exists(const char *path) {
+    return access(path, F_OK) == 0;
+}
+
+static void test_the_provenance_path_sits_beside_the_trace(void) {
+    char buf[64];
+    assert(gz_record_provenance_path(buf, sizeof buf, "/tmp/t.csv") == 0);
+    assert(strcmp(buf, "/tmp/t.csv.correction.conf") == 0);
+
+    /* Refused rather than truncated, since a truncated name would remove or
+     * write the wrong file. */
+    char tight[10];
+    assert(gz_record_provenance_path(tight, sizeof tight, "/tmp/t.csv") == -1);
+    assert(gz_record_provenance_path(buf, 0, "/tmp/t.csv") == -1);
+}
+
+/* The Important finding of review round 1. A --raw recording over a path that
+ * once held a corrected trace left the old correction file in place, so an
+ * uncorrected trace sat beside a file claiming a fit produced it, which is
+ * exactly what traces/README.md tells the reader cannot happen. */
+static void test_clearing_removes_a_stale_provenance_file(void) {
+    char trace[256], prov[300];
+    snprintf(trace, sizeof trace, "/tmp/gz_rec_%d_stale.csv", (int)getpid());
+    assert(gz_record_provenance_path(prov, sizeof prov, trace) == 0);
+
+    write_file(prov, "version=2\nform=1\n");
+    assert(file_exists(prov));
+
+    assert(gz_record_clear_provenance(trace) == 0);
+    assert(!file_exists(prov));
+
+    remove(trace);
+}
+
+/* Absent is the normal case, not a failure: most recordings go to a fresh
+ * path and must not be refused for it. */
+static void test_clearing_a_path_with_no_provenance_succeeds(void) {
+    char trace[256], prov[300];
+    snprintf(trace, sizeof trace, "/tmp/gz_rec_%d_absent.csv", (int)getpid());
+    assert(gz_record_provenance_path(prov, sizeof prov, trace) == 0);
+    remove(prov);
+    assert(!file_exists(prov));
+
+    assert(gz_record_clear_provenance(trace) == 0);
+    assert(gz_record_clear_provenance(trace) == 0);
+    assert(!file_exists(prov));
+}
+
+/* It removes the file beside THIS trace and nothing else. A clear that walked
+ * a directory would take out a neighbouring trace's provenance. */
+static void test_clearing_leaves_a_neighbours_provenance_alone(void) {
+    char mine[256], other[256], mineProv[300], otherProv[300];
+    snprintf(mine, sizeof mine, "/tmp/gz_rec_%d_a.csv", (int)getpid());
+    snprintf(other, sizeof other, "/tmp/gz_rec_%d_b.csv", (int)getpid());
+    assert(gz_record_provenance_path(mineProv, sizeof mineProv, mine) == 0);
+    assert(gz_record_provenance_path(otherProv, sizeof otherProv, other) == 0);
+
+    write_file(mineProv, "mine\n");
+    write_file(otherProv, "theirs\n");
+
+    assert(gz_record_clear_provenance(mine) == 0);
+    assert(!file_exists(mineProv));
+    assert(file_exists(otherProv));
+
+    remove(otherProv);
+}
+
+/* A name too long to build is refused rather than acted on, so nothing is
+ * removed on a guess. */
+static void test_clearing_refuses_an_unbuildable_name(void) {
+    char huge[900];
+    memset(huge, 'x', sizeof huge - 1);
+    huge[sizeof huge - 1] = '\0';
+    assert(gz_record_clear_provenance(huge) == -1);
 }
 
 /* ---------- the refusal decision ---------- */
@@ -480,6 +730,21 @@ int main(void) {
     test_an_absurd_field_is_refused_with_room_to_spare();
     test_an_absurd_corrected_value_is_refused();
     test_a_nan_from_the_device_still_produces_a_full_row();
+
+    test_the_eye_origins_are_written_in_tracker_mm();
+    test_the_eye_origins_are_not_corrected();
+    test_an_eyeless_frame_writes_zero_not_nan();
+
+    test_a_parsed_but_refused_correction_is_not_applied();
+    test_a_zero_gain_nans_every_corrected_column();
+    test_a_zero_y_gain_nans_every_corrected_column();
+    test_the_formatter_does_not_re_apply_the_loaders_bounds();
+
+    test_the_provenance_path_sits_beside_the_trace();
+    test_clearing_removes_a_stale_provenance_file();
+    test_clearing_a_path_with_no_provenance_succeeds();
+    test_clearing_leaves_a_neighbours_provenance_alone();
+    test_clearing_refuses_an_unbuildable_name();
 
     test_a_missing_correction_refuses_the_recording();
     test_an_unusable_correction_refuses_the_recording();

@@ -228,9 +228,9 @@ static void usage(void) {
             "                             host-side fit unless --raw\n"
             "\n"
             "--output names an X RandR output; the default is the X primary.\n"
-            "display, probe, calibrate and accuracy exit 0 when they agree, 1 when the\n"
-            "device disagrees (fix with tobiifreed --force-display-area), 3 when the\n"
-            "geometry could not be read at all, and 2 on a usage or config error.\n");
+            "display, probe, calibrate, accuracy and record exit 0 when they agree, 1\n"
+            "when the device disagrees (fix with tobiifreed --force-display-area), 3 when\n"
+            "the geometry could not be read at all, and 2 on a usage or config error.\n");
 }
 
 /* --output/--config/--label, shared by the three stimulus commands. Returns 0,
@@ -352,7 +352,10 @@ int main(int argc, char **argv) {
                 char *end = NULL;
                 long v = strtol(argv[++a], &end, 10);
                 if (end == argv[a] || *end != '\0' || v <= 0 || v > 86400) {
-                    fprintf(stderr, "--seconds wants 1..86400\n");
+                    /* Names the value, because the usual way to reach this is
+                     * `record --seconds PATH`, where --seconds ate the path and
+                     * a message about the bound sends the reader nowhere. */
+                    fprintf(stderr, "--seconds wants 1..86400, got \"%s\"\n", argv[a]);
                     return 2;
                 }
                 o.seconds = (unsigned)v;

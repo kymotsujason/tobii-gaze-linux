@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "calibrate.h"
 #include "display.h"
@@ -44,11 +45,29 @@ static int fmt_corr(char *buf, size_t cap, int have, double v) {
     return n >= 0 && (size_t)n < cap;
 }
 
+/* Whether a correction may be applied to a row at all.
+ *
+ * The valid flag first, because gz_correction_parse writes the parsed numbers
+ * out with valid left at 0 on GZ_CORR_PARSE_BOUNDS, so a refused file arrives
+ * here as a struct carrying real-looking gains that nobody accepted.
+ *
+ * Then the gains, and this is the SAME test gz_gaze_correct applies at
+ * proto.c:408, deliberately. The defect it closes is the two paths disagreeing:
+ * gz_correct_point divides without checking, so a correction with valid = 1 and
+ * gx = 0 wrote inf into corr_lx while corr_cx came out nan, and a row that
+ * contradicts itself is worse than one that refuses.
+ *
+ * NOT gz_correction_check, which is the LOADER's policy. Bounds and isotropy
+ * decide which files may be used at all, and re-running them here would
+ * silently nan a fit that gz_correction_load had already accepted. */
+static int correction_usable(const struct gz_correction *c) {
+    if (c == NULL || !c->valid) return 0;
+    return c->gx != 0.0 && c->gy != 0.0;
+}
+
 size_t gz_record_row(char *buf, size_t cap, const struct gz_gaze_sample *s,
                      const struct gz_correction *corr, uint64_t host_ns) {
-    /* A zeroed-but-never-loaded correction has gains of 0.0, so applying it
-     * would divide by zero and write inf into the trace. */
-    int usable = (corr != NULL && corr->valid);
+    int usable = correction_usable(corr);
     double cl[2] = {0, 0}, cr[2] = {0, 0}, cc[2] = {0, 0};
     int hl = 0, hr = 0, hc = 0;
 
@@ -80,7 +99,8 @@ size_t gz_record_row(char *buf, size_t cap, const struct gz_gaze_sample *s,
     int n = snprintf(row, sizeof row,
                      "%llu,%lld,%u,%u,%u,%u,"
                      "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.3f,%.3f,"
-                     "%s,%s,%s,%s,%s,%s\n",
+                     "%s,%s,%s,%s,%s,%s,"
+                     "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
                      (unsigned long long)host_ns, (long long)s->timestamp_us,
                      s->frame_counter, s->present_mask, s->validity_L, s->validity_R,
                      s->gaze_point_2d_L_norm[0], s->gaze_point_2d_L_norm[1],
@@ -88,7 +108,12 @@ size_t gz_record_row(char *buf, size_t cap, const struct gz_gaze_sample *s,
                      s->gaze_point_2d_norm[0], s->gaze_point_2d_norm[1],
                      s->gaze_point_2d_unfiltered[0], s->gaze_point_2d_unfiltered[1],
                      s->pupil_L_mm, s->pupil_R_mm,
-                     t[0], t[1], t[2], t[3], t[4], t[5]);
+                     t[0], t[1], t[2], t[3], t[4], t[5],
+                     /* Tracker mm, uncorrected, exactly as sent. The 0.0 an
+                      * eyeless frame carries is written as 0.000 rather than
+                      * nan, since validity_L and validity_R already say so. */
+                     s->eye_origin_L_mm[0], s->eye_origin_L_mm[1], s->eye_origin_L_mm[2],
+                     s->eye_origin_R_mm[0], s->eye_origin_R_mm[1], s->eye_origin_R_mm[2]);
     if (n < 0 || (size_t)n >= sizeof row) return 0;
     if ((size_t)n >= cap) return 0;
 
@@ -120,13 +145,49 @@ static void ensure_parent_dir(const char *path) {
     mkdir(dir, 0755);
 }
 
-/* The trace says which fit produced it, by carrying a byte copy of the
- * correction file beside it. Without this a trace is a set of numbers nobody
- * can attribute, and the fit on disk is overwritten by the next `gaze-cal
- * fit`. Returns 0, or -1 after printing why. */
+/* ---- provenance ----
+ *
+ * The trace says which fit produced it, by carrying a byte copy of the
+ * correction file beside it. Without that a trace is a set of numbers nobody
+ * can attribute, since the fit on disk is overwritten by the next
+ * `gaze-cal fit`. The three functions below build that name, remove the file,
+ * and write it. */
+
+/* Builds the name only. Returns 0, or -1 when it does not fit, and prints
+ * nothing: the callers differ on what a failure means. */
+int gz_record_provenance_path(char *buf, size_t cap, const char *trace_path) {
+    int n = snprintf(buf, cap, "%s.correction.conf", trace_path);
+    if (n < 0 || (size_t)n >= cap) return -1;
+    return 0;
+}
+
+/* The whole of the --raw half of provenance. Without it a --raw recording over
+ * a path that once held a corrected trace leaves the old correction file in
+ * place, and traces/README.md tells the reader that a trace with no correction
+ * file beside it is the raw one. The trace's own nan columns still say the
+ * truth, so nothing downstream computes a wrong number, but the two records
+ * disagree and only one of them is read by eye. */
+int gz_record_clear_provenance(const char *trace_path) {
+    char dest[600];
+    if (gz_record_provenance_path(dest, sizeof dest, trace_path) != 0) {
+        fprintf(stderr, "trace path too long to name the correction beside it\n");
+        return -1;
+    }
+    if (unlink(dest) == 0) {
+        fprintf(stderr, "removed the stale provenance file %s\n", dest);
+        return 0;
+    }
+    /* Never having been there is the normal case, not a failure. Anything else
+     * is refused loudly rather than left to be discovered later. */
+    if (errno == ENOENT) return 0;
+    fprintf(stderr, "cannot remove %s: %s\n", dest, strerror(errno));
+    return -1;
+}
+
+/* Writes the copy. Returns 0, or -1 after printing why. */
 static int copy_correction_beside(const char *trace_path, const char *corr_path) {
     char dest[600];
-    if (snprintf(dest, sizeof dest, "%s.correction.conf", trace_path) >= (int)sizeof dest) {
+    if (gz_record_provenance_path(dest, sizeof dest, trace_path) != 0) {
         fprintf(stderr, "trace path too long to write the correction beside it\n");
         return -1;
     }
@@ -225,6 +286,17 @@ int gz_cmd_record(const struct gz_record_opts *o) {
         fprintf(stderr, "correction: gx=%.6f gy=%.6f bx=%.6f by=%.6f, fitted at seat "
                         "(%.4f, %.4f)\n",
                 corr.gx, corr.gy, corr.bx, corr.by, corr.eye_proj[0], corr.eye_proj[1]);
+    }
+
+    /* Before the fopen, so a removal that fails refuses without having already
+     * truncated whatever trace was sitting there. A --raw recording over a path
+     * that once held a corrected one would otherwise leave the old correction
+     * file beside a trace whose corr_* columns are all nan. */
+    if (mode == GZ_REC_RAW && gz_record_clear_provenance(o->path) != 0) {
+        fprintf(stderr, "REFUSING to write an uncorrected trace beside a correction\n"
+                        "file that claims a fit produced it\n");
+        gz_client_close(&c);
+        return 1;
     }
 
     ensure_parent_dir(o->path);

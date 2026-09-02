@@ -975,8 +975,8 @@ run_mutation "an eyeless frame's combined point corrected anyway" record.c \
     "        hc = 1;"
 
 run_mutation "a correction that was never loaded applied anyway" record.c \
-    "    int usable = (corr != NULL && corr->valid);" \
-    "    int usable = (corr != NULL);"
+    "    if (c == NULL || !c->valid) return 0;" \
+    "    if (c == NULL) return 0;"
 
 run_mutation "the caller's buffer bound dropped" record.c \
     "    if ((size_t)n >= cap) return 0;" \
@@ -991,8 +991,8 @@ run_mutation "the device stamp printed unsigned" record.c \
     "                     \"%llu,%llu,%u,%u,%u,%u,\""
 
 run_mutation "the corrected columns dropped from the header" record.h \
-    "    \"corr_lx,corr_ly,corr_rx,corr_ry,corr_cx,corr_cy\\n\"" \
-    "    \"\\n\""
+    "    \"corr_lx,corr_ly,corr_rx,corr_ry,corr_cx,corr_cy,\" \\" \
+    "    \"\" \\"
 
 run_mutation "a missing correction recorded anyway" record.c \
     "    if (load_rc == 1) return GZ_REC_CORRECTED;" \
@@ -1001,6 +1001,46 @@ run_mutation "a missing correction recorded anyway" record.c \
 run_mutation "--raw ignored" record.c \
     "    if (raw) return GZ_REC_RAW;" \
     "    if (0) return GZ_REC_RAW;"
+
+# The six eye-origin columns. Form S is scoped per seating position, so a trace
+# that loses where the head was cannot be re-analysed for head movement without
+# costing the human another five-minute session.
+run_mutation "the eye origins dropped from the header" record.h \
+    "    \"eye_lx,eye_ly,eye_lz,eye_rx,eye_ry,eye_rz\\n\"" \
+    "    \"\\n\""
+
+run_mutation "the right eye origin read from the left" record.c \
+    "                     s->eye_origin_R_mm[0], s->eye_origin_R_mm[1], s->eye_origin_R_mm[2]);" \
+    "                     s->eye_origin_L_mm[0], s->eye_origin_L_mm[1], s->eye_origin_L_mm[2]);"
+
+run_mutation "the eye origins corrected like a gaze point" record.c \
+    "                     s->eye_origin_L_mm[0], s->eye_origin_L_mm[1], s->eye_origin_L_mm[2]," \
+    "                     s->eye_origin_L_mm[0] / 1.18, s->eye_origin_L_mm[1], s->eye_origin_L_mm[2],"
+
+# The Important finding of review round 1: a --raw recording over a path that
+# once held a corrected trace left the old .correction.conf in place, so an
+# uncorrected trace sat beside a file claiming a fit produced it.
+run_mutation "raw branch leaves a stale provenance file" record.c \
+    "    if (unlink(dest) == 0) {" \
+    "    if (0) {"
+
+run_mutation "a missing provenance file reported as a failure" record.c \
+    "    if (errno == ENOENT) return 0;" \
+    "    if (0) return 0;"
+
+run_mutation "the provenance name built without the suffix" record.c \
+    "    int n = snprintf(buf, cap, \"%s.correction.conf\", trace_path);" \
+    "    int n = snprintf(buf, cap, \"%s\", trace_path);"
+
+run_mutation "the provenance name truncated instead of refused" record.c \
+    "    if (n < 0 || (size_t)n >= cap) return -1;" \
+    "    if (n < 0) return -1;"
+
+# The per-eye divide. gz_correct_point divides without checking, so without the
+# gain test the two halves of one row disagree: inf in corr_lx, nan in corr_cx.
+run_mutation "the per-eye path divides by an unchecked gain" record.c \
+    "    return c->gx != 0.0 && c->gy != 0.0;" \
+    "    return 1;"
 
 echo
 echo "killed=$killed  documented_survivors=$documented  unexpected_survivors=$unexpected"
