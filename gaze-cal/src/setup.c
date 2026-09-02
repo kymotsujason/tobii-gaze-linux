@@ -135,11 +135,20 @@ static void io_reload(void *ctx) { load_correction(ctx); }
 /* The refusal reasons run to 200 characters and the verdict block starts two
  * thirds of the way across the panel, so an unwrapped line runs off the right
  * edge and the half that gets cut is the remedy. Breaks at spaces, and only
- * mid-word when one word is wider than the space. Returns the next baseline. */
-static int draw_wrapped(struct gz_stimulus *st, int x, int y, int max_w,
+ * mid-word when one word is wider than the space. Stops at `max_y` rather than
+ * running into whatever is below, which for the verdict block is the target
+ * disc: four lines fit above it and a long refusal wraps to six. Returns the
+ * next baseline. */
+static int draw_wrapped(struct gz_stimulus *st, int x, int y, int max_w, int max_y,
                         const char *text, unsigned long rgb, int lh) {
+    /* One clipped line beats one character per line, which is what the wrap
+     * degenerates to when the block starts past the right edge. */
+    if (max_w <= 0) {
+        if (y <= max_y) gz_stimulus_text(st, x, y, text, rgb);
+        return y + lh;
+    }
     char buf[256];
-    while (*text != '\0') {
+    while (*text != '\0' && y <= max_y) {
         size_t n = strlen(text);
         if (n > sizeof buf - 1) n = sizeof buf - 1;
         for (;;) {
@@ -182,9 +191,15 @@ static void draw_frame(struct setup_ctx *s, const struct gz_view_layout *l,
     const struct gz_gaze_sample *sm = &f->sample;
     int th = gz_stimulus_text_height(st);
 
-    /* A dropped link freezes the last sample, so without this the eye dots stay
-     * green over a dead socket. Spec section 11: they go hollow instead. */
-    int live = f->have_sample && !f->reconnecting;
+    /* A frozen last sample must never be drawn as a measurement. Two states
+     * freeze it: a dropped link, where reconnecting is set, and a STALE link,
+     * where the tracker is gone but the daemon is healthy so the client is
+     * deliberately kept open and reconnecting is never set. no_eyes covers the
+     * second, since it fires one second after the last valid frame and cannot
+     * fire while frames with valid eyes keep arriving. A live stream of
+     * eyeless frames is unaffected: those carry validity 4 and already draw
+     * hollow. */
+    int live = f->have_sample && !f->reconnecting && !f->no_eyes;
     int lv = live && sm->validity_L == GZ_VALIDITY_VALID;
     int rv = live && sm->validity_R == GZ_VALIDITY_VALID;
 
@@ -219,18 +234,26 @@ static void draw_frame(struct setup_ctx *s, const struct gz_view_layout *l,
         gz_stimulus_rect(st, l->bar_x + 1, gz_view_bar_py(l, bz) - 3,
                          l->bar_w - 1, 6, GREEN, 1);
 
-    /* readout */
+    /* The readout, pushed clear of the target disc. Its baseline is
+     * scr->h - margin, 1392 here, so at 39 px text the glyph tops sit near
+     * 1359 while the disc bottom is target_cy + target_r, 1374, and the disc
+     * is drawn after it: from x 1386 rightwards it erased the top of the line.
+     * Only moved when they would meet, and only while the panel has the room. */
     char line[256];
     gz_view_readout_text(z_mm, lv, rv, f->hz, s->have_corr ? s->fit_stamp : NULL,
                          s->stale_file, f->no_eyes, f->reconnecting, line, sizeof line);
-    gz_stimulus_text(st, l->readout_x, l->readout_y, line, TEXT);
+    int ry = l->readout_y;
+    int disc_bottom = l->target_cy + l->target_r;
+    if (ry - th < disc_bottom && disc_bottom + th <= scr->h - 4) ry = disc_bottom + th;
+    gz_stimulus_text(st, l->readout_x, ry, line, TEXT);
 
     /* Along the top, not above the readout: the readout sits one line under the
      * box and there is nothing between them. */
     if (s->gate_mismatch)
         gz_stimulus_text(st, l->readout_x, th + 20,
-                         "display area mismatch: the sweeps will refuse. Fix it with"
-                         " tobiifreed --force-display-area", RED);
+                         "display area mismatch: the sweeps will refuse and the fit on"
+                         " disk was not read. Fix it with tobiifreed"
+                         " --force-display-area", RED);
 
     /* gaze: the device's own point in orange, the corrected one in green */
     if (live && gz_sample_any_eye_valid(sm)) {
@@ -277,10 +300,15 @@ static void draw_frame(struct setup_ctx *s, const struct gz_view_layout *l,
         int y = l->verdict_y;
         int lh = th + 6;
         int max_w = scr->w - l->verdict_x - 24;
-        for (char *p = text; p != NULL && *p != '\0'; ) {
+        /* The block ends where the target disc starts. A refusal carrying 200
+         * characters of reason and 120 of remedy wraps past four lines, and the
+         * fifth would land on the disc, so the tail is dropped instead. The
+         * terminal keeps the whole thing either way. */
+        int max_y = l->target_cy - l->target_r - lh / 2;
+        for (char *p = text; p != NULL && *p != '\0' && y <= max_y; ) {
             char *nl = strchr(p, '\n');
             if (nl != NULL) *nl = '\0';
-            y = draw_wrapped(st, l->verdict_x, y, max_w, p,
+            y = draw_wrapped(st, l->verdict_x, y, max_w, max_y, p,
                              v->verdict.refused ? RED : TEXT, lh);
             p = (nl != NULL) ? nl + 1 : NULL;
         }
@@ -317,17 +345,21 @@ int gz_cmd_setup(const struct gz_setup_opts *o) {
     s.o = o;
     gz_client_init(&s.c);
 
-    s.stim = gz_stimulus_open_input(o->output);
-    if (s.stim == NULL) return 3;
-    const struct gz_screen *scr = gz_stimulus_screen(s.stim);
-    struct gz_view_layout l;
-    gz_view_layout(scr, &l);
-
+    /* Before the open, not after. The window takes a keyboard grab, and a
+     * signal arriving between the two would kill the process under the default
+     * disposition. The X server drops the grab when the connection closes, so
+     * nothing stayed locked, but the gap costs nothing to close. */
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_setup_stop;
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+
+    s.stim = gz_stimulus_open_input(o->output);
+    if (s.stim == NULL) return 3;
+    const struct gz_screen *scr = gz_stimulus_screen(s.stim);
+    struct gz_view_layout l;
+    gz_view_layout(scr, &l);
 
     /* The gate returns GZ_GATE_UNKNOWN for three different causes and this is
      * the only place that can tell them apart, so the config is resolved here
@@ -354,7 +386,7 @@ int gz_cmd_setup(const struct gz_setup_opts *o) {
          * codes because only one of them is fixed by starting a service. */
         if (s.c.fd < 0)
             return fail_screen(&s, &l,
-                               "the gaze daemon is not answering."
+                               "the gaze daemon isn't answering."
                                " Start it with: systemctl --user start tobiifreed", 1);
         return fail_screen(&s, &l, "the display area could not be read off the device", 3);
     }

@@ -233,11 +233,12 @@ static void usage(void) {
             "                             and verify sweeps run from the screen\n"
             "\n"
             "--output names an X RandR output; the default is the X primary.\n"
-            "display, probe, calibrate, accuracy, record and setup exit 0 when they agree,\n"
-            "1 when the device disagrees (fix with tobiifreed --force-display-area), 3\n"
-            "when the geometry could not be read at all, and 2 on a usage or config\n"
-            "error. setup exits 1 when the daemon never answered, since a mismatch\n"
-            "opens the view rather than refusing.\n");
+            "display, probe, calibrate, accuracy and record exit 0 when they agree, 1\n"
+            "when the device disagrees (fix with tobiifreed --force-display-area), 3 when\n"
+            "the geometry could not be read at all, and 2 on a usage or config error.\n"
+            "setup exits 0 when you close it, 1 when the daemon never answered, 3 when\n"
+            "the geometry could not be read and 2 on a config error. It has no code for a\n"
+            "device disagreement, since a mismatch opens the view with a banner.\n");
 }
 
 /* --output/--config/--label, shared by the three stimulus commands. Returns 0,
