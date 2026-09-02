@@ -48,6 +48,41 @@ int gz_stimulus_show(struct gz_stimulus *s, double nx, double ny);
 int gz_stimulus_blank(struct gz_stimulus *s);
 void gz_stimulus_close(struct gz_stimulus *s);
 
+#define GZ_KEY_NONE   0
+#define GZ_KEY_ENTER  1
+#define GZ_KEY_ESCAPE 2
+#define GZ_KEY_OTHER  3
+
+/* Like gz_stimulus_open, plus a back buffer, key events and a keyboard grab.
+ * The window is override_redirect, so KWin never focuses it: without the grab
+ * it receives no key press at all. gz_stimulus_close releases the grab, and so
+ * must every exit path, because a held grab locks the keyboard for the whole
+ * session. Returns NULL after printing why. */
+struct gz_stimulus *gz_stimulus_open_input(const char *output);
+
+/* The next key press, or GZ_KEY_NONE. Never blocks. */
+int gz_stimulus_key(struct gz_stimulus *s);
+
+/* Back buffer drawing, window coordinates, colours as 0xRRGGBB. Nothing shows
+ * until gz_stimulus_present copies the buffer to the window. The existing
+ * gz_stimulus_show draws straight to the window and is unchanged. */
+void gz_stimulus_clear(struct gz_stimulus *s);
+void gz_stimulus_rect(struct gz_stimulus *s, int x, int y, int w, int h,
+                      unsigned long rgb, int filled);
+void gz_stimulus_disc(struct gz_stimulus *s, int cx, int cy, int r, unsigned long rgb);
+/* An arc of `degrees` out of 360, starting at the top and running clockwise,
+ * `width` pixels thick. 360 is a full ring. */
+void gz_stimulus_ring(struct gz_stimulus *s, int cx, int cy, int r, int width,
+                      unsigned long rgb, int degrees);
+/* Left-aligned at (x, y) with y the baseline. Returns the width drawn in px.
+ * The width already accounts for the upscale described in stimulus.c, so a
+ * caller lays text out with this and gz_stimulus_text_height and never needs
+ * to know the scale. */
+int  gz_stimulus_text(struct gz_stimulus *s, int x, int y, const char *text,
+                      unsigned long rgb);
+int  gz_stimulus_text_height(const struct gz_stimulus *s);
+void gz_stimulus_present(struct gz_stimulus *s);
+
 #ifdef __cplusplus
 }
 #endif
