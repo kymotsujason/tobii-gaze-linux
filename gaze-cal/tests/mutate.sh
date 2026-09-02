@@ -879,6 +879,16 @@ run_mutation "fit skips the envelope check" calibrate.c \
 run_mutation "fit rejects a perfect sweep against a zero median" calibrate.c \
     "        if (!(med > 1e-6)) break;" "        ;"
 
+# The post-refit guard. Disabling it restores the absorbed opposite-axis
+# outlier, which is a 5.7 percent gain error no other guard sees.
+run_mutation "the post-refit outlier accepted" calibrate.c \
+    "            if (rep->refit_outlier >= 0) {" "            if (0) {"
+
+# Its median floor. Without it the eight survivors of a clean single-outlier
+# sweep sit past 3x a median of picometres and refuse themselves.
+run_mutation "the post-refit guard has no median floor" calibrate.c \
+    "            if (med2 > 1e-6) {" "            if (1) {"
+
 run_mutation "fit accepts a degenerate point count" calibrate.c \
     "    if (n < 4 || n > GZ_CAL_POINTS) return GZ_FIT_ERR_POINTS;" "    ;"
 

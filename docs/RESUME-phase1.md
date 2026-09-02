@@ -107,7 +107,7 @@ Spec test 5.3 decided against the head-aware form: **the scale centre is not the
    form H parameters whose offsets are eye-relative, so form S REFUSES it: reading it as
    form S would be wrong by about 90 px and would look like a working calibration. Run
    `gaze-cal fit` where you actually sit, then `gaze-cal accuracy --label verify-formS`
-   without moving, expecting 33 to 50 px and WITHIN ONE DEGREE. Re-fit whenever the seat
+   without moving, expecting 35 to 50 px and WITHIN ONE DEGREE. Re-fit whenever the seat
    changes for good.
 2. **Task 15**, five minutes of real osu, which is now unblocked once form S is verified.
    It must be recorded through a CORRECTED stream: a trace carrying the 18 percent gain

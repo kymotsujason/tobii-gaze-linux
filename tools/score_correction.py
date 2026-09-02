@@ -179,6 +179,24 @@ def fit(sweep, head_aware=False):
             resid.append(math.hypot((cor[0] - p["target"][0]) * AREA_W_MM,
                                     (cor[1] - p["target"][1]) * AREA_H_MM))
         if second_pass:
+            # The post-refit guard, mirroring gz_correction_fit. The second pass
+            # only runs when the first dropped a point, so a sweep that rejected
+            # nothing never reaches this. When one did go, a survivor still past
+            # 3x the REFIT median is the second bad point its own axis absorbed,
+            # which neither the envelope nor the isotropy bound can see.
+            kept = sorted(r for r, k in zip(resid, use) if k)
+            med2 = kept[len(kept) // 2] if len(kept) % 2 else \
+                (kept[len(kept) // 2 - 1] + kept[len(kept) // 2]) / 2
+            if med2 > 1e-6:     # same floor, so a near-perfect refit is safe
+                past = [i for i, (r, k) in enumerate(zip(resid, use))
+                        if k and r > 3.0 * med2]
+                if past:
+                    sys.exit(
+                        "%s: point %d still sits past 3x the median residual after "
+                        "the refit (%.1f mm against a %.1f mm median). gaze-cal fit "
+                        "would have REFUSED this sweep, so there is nothing here to "
+                        "score against. Re-run the sweep."
+                        % (sweep["label"], past[0] + 1, resid[past[0]], med2))
             break
 
         kept = sorted(r for r, k in zip(resid, use) if k)
@@ -202,7 +220,12 @@ def fit(sweep, head_aware=False):
         print("  rejected point %d as an outlier (%.1f mm against a %.1f mm median"
               " before the refit), refitting" % (drops[0] + 1, resid[drops[0]], med))
 
-    ep = tuple(sum(p["eproj"][a] for p in pts) / len(pts) for a in (0, 1))
+    # Survivors only, which is what fit_summary averages at calibrate.c:471-476.
+    # The two disagree whenever a point was rejected, and one recorded sweep
+    # does reject one.
+    nk = sum(1 for k in use if k)
+    ep = tuple(sum(p["eproj"][a] for p, k in zip(pts, use) if k) / nk
+               for a in (0, 1))
     return tuple(g), tuple(b), ep, rejected, resid, use
 
 

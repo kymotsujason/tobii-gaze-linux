@@ -244,11 +244,16 @@ struct gz_fit_input {
 #define GZ_FIT_ERR_FLAT    (-2)   /* the targets do not span an axis */
 #define GZ_FIT_ERR_OUTLIER (-3)   /* more than one point past 3x the median */
 #define GZ_FIT_ERR_BOUNDS  (-4)   /* gain or isotropy outside GZ_CORR_* */
+#define GZ_FIT_ERR_REFIT   (-5)   /* a point still past 3x the median after the refit */
 
 struct gz_fit_report {
     int    n_in, n_used;
     int    rejected[GZ_CAL_POINTS];   /* 1 where a point was dropped as an outlier */
     int    n_rejected;
+    /* Index of the point that survived the rejection and still sat past 3x the
+     * refit median, or -1. Set only on the GZ_FIT_ERR_REFIT path, and it is
+     * what the refusal message names. */
+    int    refit_outlier;
     /* Corrected-minus-target, in mm on the panel, for every input point,
      * including rejected ones. This is the acceptance quantity, not the
      * regression residual: they differ by the factor g. */
@@ -269,8 +274,11 @@ struct gz_fit_report {
  *
  * Rejects a point whose residual exceeds 3x the median and refits once. More
  * than one such point fails the whole sweep, because at that rate the sweep is
- * not measuring a fixation. Pure and fixed-size, so it can move into proto.c if
- * Plan 2 ever needs to fit. Returns GZ_FIT_OK or a GZ_FIT_ERR_*. */
+ * not measuring a fixation. After the refit, a survivor still past 3x the new
+ * median fails it too, as GZ_FIT_ERR_REFIT: that is the second bad point its
+ * own axis absorbed, which no per-axis rule and no isotropy bound can see.
+ * Pure and fixed-size, so it can move into proto.c if Plan 2 ever needs to
+ * fit. Returns GZ_FIT_OK or a GZ_FIT_ERR_*. */
 int gz_correction_fit(const struct gz_fit_input *in, int n, struct gz_rect area,
                       struct gz_correction *out, struct gz_fit_report *rep);
 

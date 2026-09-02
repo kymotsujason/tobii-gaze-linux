@@ -1207,6 +1207,12 @@ static void test_fit_drops_one_outlier_and_refits(void) {
     assert(gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep) == GZ_FIT_OK);
     assert(rep.n_rejected == 1 && rep.rejected[4] == 1);
     assert(rep.n_used == GZ_CAL_POINTS - 1);
+    /* This is verify-normal#1's shape, the one recorded sweep that exercises
+     * the rejection path at all: one point goes, the refit is accepted, and the
+     * post-refit guard finds nothing. It also pins that guard's median floor,
+     * since these eight survivors fit to picometres and 3x a median of
+     * picometres would refuse every one of them. */
+    assert(rep.refit_outlier == -1);
     /* The refit lands back on the truth, which it cannot do if the outlier is
      * still carrying weight. */
     assert(fabs(c.gx - 1.1695) < 1e-9);
@@ -1259,25 +1265,25 @@ static void test_fit_refuses_two_outliers(void) {
     assert(rep.rejected[1] == 1 && rep.rejected[7] == 1);
 }
 
-static void test_a_second_outlier_on_the_other_axis_is_absorbed(void) {
-    /* A KNOWN HOLE, pinned so it cannot be discovered again by accident.
+static void test_a_second_outlier_on_the_other_axis_is_refused(void) {
+    /* The case that used to be absorbed, and the post-refit guard that closes
+     * it. Same geometry as when it was a documented hole, so this stays the
+     * case the 2026-09-01 review measured.
      *
-     * The spec's rule scores one residual per point over both axes and rejects
-     * once. A second bad point displaced on the OTHER axis is partly absorbed
-     * by that axis's regression, so it stays under 3x the median: here it drags
-     * gy from 1.1875 to 1.1202, a 5.7 percent gain error, and the fit is
-     * ACCEPTED. The isotropy invariant does not catch it either, because
-     * pulling gy down moves it TOWARD gx, to a ratio of 1.044.
+     * Two bad points on different axes. The 3x-median rule sees only the first,
+     * because the second is partly absorbed by its own axis's regression, and
+     * the absorbed fit drags gy from 1.1875 to 1.1202. That is a 5.7 percent
+     * gain error that no other guard catches: isotropy does not, because
+     * pulling gy down moves it TOWARD gx, to a ratio of 1.044, and a bound
+     * tight enough to catch 1.044 also refuses lateral#1's own self-fit at
+     * 1.04657.
      *
-     * The obvious fix, a per-axis 3x rule, was measured against the four real
-     * sweeps and would have refused fit#9 and lateral#1, the two that actually
-     * produced working corrections. So the rule is left as specified and the
-     * damage is bounded instead: a verify sweep run against a fit this bad
-     * reads 20 px median and 54 px worst, with the error concentrated in one
-     * row of the per-point table, which is where a human would see it.
-     *
-     * If this is ever closed properly, the answer is more calibration points,
-     * not a tighter rule on nine. */
+     * What does catch it is the SECOND round of the same rule. After the refit,
+     * point 7 still sits past 3x the new median, so the sweep is refused. The
+     * guard only runs when a rejection already happened, and over all seven
+     * recorded nine-point sweeps it fires on none, so it costs a good sweep
+     * nothing. A per-axis rule was measured instead and would have refused
+     * fit#9 and lateral#1, the two sweeps that produced working corrections. */
     struct gz_fit_input in[GZ_CAL_POINTS];
     synth_sweep(in, 1.1695, 1.1875, -0.1034, -0.2479, 0.0);
     in[2].reported[0] += 0.15;
@@ -1287,13 +1293,18 @@ static void test_a_second_outlier_on_the_other_axis_is_absorbed(void) {
     struct gz_fit_report rep;
     int rc = gz_correction_fit(in, GZ_CAL_POINTS, corr_area(), &c, &rep);
 
-    assert(rc == GZ_FIT_OK);                       /* accepted, and that is the hole */
+    assert(rc == GZ_FIT_ERR_REFIT);
+    assert(c.valid == 0);                          /* and nothing is stored */
     assert(rep.n_rejected == 1 && rep.rejected[2] == 1);
+    assert(rep.refit_outlier == 6);                /* the point the message names */
+    /* The parameters the refusal reports are the absorbed ones, so a human can
+     * see what was nearly stored rather than a row of zeros. */
     assert(fabs(c.gx - 1.1695) < 1e-9);            /* the x axis is untouched */
     assert(fabs(c.gy - 1.1202) < 1e-3);            /* the y axis is 5.7 percent out */
-    assert(fabs(c.gx / c.gy - 1.0) < GZ_CORR_ISO_TOL);   /* and passes isotropy */
-    /* The residual the human is shown looks healthy, which is the point: it is
-     * about 20 px, so nothing in the fit output flags this. */
+    assert(fabs(c.gx / c.gy - 1.0) < GZ_CORR_ISO_TOL);   /* isotropy still passes it */
+    /* And the headline residual still looks healthy, about 20 px, which is why
+     * the guard rather than the printed table has to be the thing that stops
+     * this sweep. */
     assert(rep.median_resid_mm / (590.42 / 2560.0) < 30.0);
 }
 
@@ -1667,7 +1678,7 @@ int main(void) {
     test_fit_drops_one_outlier_and_refits();
     test_a_near_perfect_sweep_rejects_nothing();
     test_fit_refuses_two_outliers();
-    test_a_second_outlier_on_the_other_axis_is_absorbed();
+    test_a_second_outlier_on_the_other_axis_is_refused();
     test_fit_refuses_a_gain_outside_the_measured_envelope();
     test_fit_refuses_input_it_cannot_fit();
     test_fit_residual_is_the_corrected_error();

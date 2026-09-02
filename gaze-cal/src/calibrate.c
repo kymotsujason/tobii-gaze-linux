@@ -487,6 +487,7 @@ int gz_correction_fit(const struct gz_fit_input *in, int n, struct gz_rect area,
     memset(rep, 0, sizeof *rep);
     memset(out, 0, sizeof *out);
     rep->n_in = n;
+    rep->refit_outlier = -1;
 
     if (n < 4 || n > GZ_CAL_POINTS) return GZ_FIT_ERR_POINTS;
     if (!(area.w_mm > 0) || !(area.h_mm > 0)) return GZ_FIT_ERR_FLAT;
@@ -528,7 +529,37 @@ int gz_correction_fit(const struct gz_fit_input *in, int n, struct gz_rect area,
                                      (cor[1] - in[i].target[1]) * area.h_mm);
         }
 
-        if (pass == 1) break;
+        /* The second pass only runs when the first dropped a point, so a sweep
+         * that rejected nothing never reaches this and is untouched. When one
+         * did go, a survivor still past 3x the REFIT median is the second bad
+         * point that its own axis absorbed: measured on the pinned synthetic
+         * case it drags gy 5.7 percent while moving isotropy the wrong way, so
+         * neither the envelope nor the isotropy bound sees it. Scored over the
+         * seven recorded nine-point sweeps this refuses none of them. */
+        if (pass == 1) {
+            double kept[GZ_CAL_POINTS];
+            unsigned nk = 0;
+            for (int i = 0; i < n; i++) if (use[i]) kept[nk++] = rep->resid_mm[i];
+            double med2 = gz_stat_of(kept, nk).median;
+            /* Same floor the first pass uses. Without it the eight survivors of
+             * a near-perfect sweep have a median of picometres and refuse
+             * themselves. */
+            if (med2 > 1e-6) {
+                double worst = 0;
+                for (int i = 0; i < n; i++) {
+                    if (use[i] && rep->resid_mm[i] > 3.0 * med2 &&
+                        rep->resid_mm[i] > worst) {
+                        worst = rep->resid_mm[i];
+                        rep->refit_outlier = i;
+                    }
+                }
+            }
+            if (rep->refit_outlier >= 0) {
+                fit_summary(rep, in, use, n, gx, gy, bx, by, area, out);
+                return GZ_FIT_ERR_REFIT;
+            }
+            break;
+        }
 
         double sorted[GZ_CAL_POINTS];
         unsigned ns = 0;
@@ -701,7 +732,10 @@ int gz_correction_load_from(const char *path, struct gz_rect want,
         return -1;
     }
     if (r == GZ_CORR_PARSE_BOUNDS) {
-        say("%s: gains %.4f, %.4f are outside %.2f..%.2f or not isotropic to %.2f.\n"
+        say("%s: one of its parameters is outside what this build accepts.\n"
+            "Gains read %.4f, %.4f against %.2f..%.2f and an isotropy tolerance of\n"
+            "%.2f; the form, the offsets, the display area and the fitted seat are\n"
+            "checked as well, so a gain in range does not clear the file.\n"
             "REFUSING. Re-run `gaze-cal fit`.\n",
             path, c.gx, c.gy, GZ_CORR_G_MIN, GZ_CORR_G_MAX, GZ_CORR_ISO_TOL);
         return -1;
@@ -1131,9 +1165,9 @@ int gz_cmd_apply_saved(const char *sock) {
  *
  * One runner, so the correction is always fitted from exactly the measurement
  * the accuracy table reports, and so every sweep records its per-point eye
- * origins whether or not it is the one being fitted. The current log lacks
- * that field, which is the only reason the head-aware term is still an open
- * question. */
+ * origins whether or not it is the one being fitted. Those origins are what
+ * spec test 5.3 was scored from, and they are what says how far a later sweep
+ * sat from the seat the fit belongs to. */
 
 /* One degree is 45 px on DP-2 at 600 mm, which is the plan's yardstick. The
  * degrees below are computed from the measured eye distance instead whenever
@@ -1486,6 +1520,7 @@ static const char *fit_err_text(int rc) {
     case GZ_FIT_ERR_FLAT:    return "the stimulus did not span an axis";
     case GZ_FIT_ERR_OUTLIER: return "more than one point sat past 3x the median residual";
     case GZ_FIT_ERR_BOUNDS:  return "the fitted gain is outside the measured envelope";
+    case GZ_FIT_ERR_REFIT:   return "a point still sat past 3x the median after the refit";
     default:                 return "unknown";
     }
 }
@@ -1505,9 +1540,11 @@ int gz_cmd_fit(const char *sock, const char *cfg,
     }
     say("status: device_present=%u calibration_applied=%u\n",
         c.status.device_present, c.status.calibration_applied);
-    say("\nROOM LIGHTS ON, and sit where you play. This fit is per user and per\n"
-        "display area, not per seating position, so fit it once from the position\n"
-        "you actually use. Re-fit if you recalibrate the device.\n");
+    say("\nROOM LIGHTS ON, and sit where you play. THIS FIT IS PER SEATING\n"
+        "POSITION: it has no head term, so it decays about 0.63 px for every mm\n"
+        "you leave the seat you fitted at. Fit it where you actually sit, and\n"
+        "re-fit whenever the seat changes for good. Re-fit as well if the display\n"
+        "area changes or you recalibrate the device.\n");
 
     struct gz_sweep sw;
     if (run_sweep(&c, stim, scr, panel, &sw) != 0) {
@@ -1561,6 +1598,14 @@ int gz_cmd_fit(const char *sock, const char *cfg,
         say("\nFIT REFUSED: %s.\n"
             "Nothing was written. A wrong correction is worse than none, because\n"
             "downstream it is indistinguishable from a calibration.\n", fit_err_text(rc));
+        if (rc == GZ_FIT_ERR_REFIT && rep.refit_outlier >= 0) {
+            say("POINT %d is the one. It survived the rejection above and still sits\n"
+                "past 3x the median, which means this sweep has a second bad point\n"
+                "that its own axis absorbed. Left in, it moves a gain by several\n"
+                "percent and nothing downstream would flag it.\n"
+                "RE-RUN THE SWEEP, holding each dot until it moves.\n",
+                rep.refit_outlier + 1);
+        }
         log_close();
         return 1;
     }
@@ -1570,11 +1615,12 @@ int gz_cmd_fit(const char *sock, const char *cfg,
         return 1;
     }
     say("\nFIT DONE. Next, without moving: gaze-cal accuracy --label verify\n"
-        "Then move well to one side, or clearly up or down, and run\n"
+        "Optionally, move well to one side, or clearly up or down, and run\n"
         "  gaze-cal accuracy --label lateral\n"
-        "which records the per-point eye origins that decide whether the\n"
-        "head-aware term earns its place. A change in DEPTH does not decide it:\n"
-        "the eye projection has no z term, so both candidate forms agree.\n");
+        "which measures how fast the correction decays as you leave this seat,\n"
+        "about 0.63 px per mm. It decides nothing: spec test 5.3 ran on\n"
+        "2026-07-27 and chose this form. A change in DEPTH measures nothing\n"
+        "either, because the correction has no depth term.\n");
     log_close();
     return 0;
 }
