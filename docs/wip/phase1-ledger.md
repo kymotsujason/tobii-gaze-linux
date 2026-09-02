@@ -1744,3 +1744,86 @@ everything: fit-correction.sh, then gaze-cal record for five minutes of osu, the
 The daemon was left running. The agent worktree and its branch were removed after both
 commits were confirmed content-identical to the cherry-picks (only index hashes and hunk
 offsets differed).
+
+## 2026-09-02, session 4 continued: the track box setup view, and the top drop explained
+
+A new spec and plan were written and executed outside the Phase 1 plan, the way Task 13b was.
+Spec `docs/superpowers/specs/2026-09-01-trackbox-setup-view-design.md`, plan
+`docs/superpowers/plans/2026-09-01-trackbox-setup-view.md`, five tasks, four of them
+subagent-driven with a review each. `gaze-cal setup` opens a fullscreen view on the gameplay
+monitor showing the device's own track box with both eyes, the distance against the 520 mm
+floor, the raw gaze in orange and the corrected gaze in green, and it runs the fit and verify
+sweeps from that screen with a short verdict drawn in the window.
+
+THE TRACK BOX FIELDS ARE REAL AND USABLE, measured 2026-09-01 before the design committed to
+them. `trackbox_eye_pos_L` and `_R` (columns 0x03 and 0x09, which the driver's comment at
+`tobiifree_core.zig:897` calls the eye's normalised position in the track box) sit in 0 to 1,
+read 0.5 on the tracker's centre line, go to exactly zero when that eye is invalid, and move
+with the head. Over 32 s and 1060 samples, 873 with both eyes valid: left eye x 0.519 to
+0.603, right eye x 0.370 to 0.452, y 0.439 to 0.483, z 0.287 to 0.403 against eye z 544 to
+600 mm. Pairing box z against eye z puts box z 0 near 410 mm and 1 near 880 mm, EXTRAPOLATED
+from 56 mm of movement and rough until somebody walks to an edge.
+  **Box x grows towards the user's LEFT**, like a camera image. The right eye at tracker
+  x +46 mm read box x 0.39 while the left eye at -17 mm read 0.54. The view therefore mirrors
+  x when it draws, which the user caught live before the fix landed. y needs no mirror: an
+  eye rising from 13 to 24 mm moved box y 0.470 to 0.446.
+  The display-space variant (0x25/0x27), which the driver documents as always zero, was LIVE
+  in the same run and tracked the first field in x and y with a different z. Unused, recorded.
+
+FIRST FIT AND VERIFY THROUGH THE SCREEN, 2026-09-01, and FORM S HOLDS ON THE LIVE DEVICE.
+  attempt 1, eye z median 551 mm : REFUSED, 7 of 9, top corners had no valid gaze
+  attempt 2, eye z 647 to 683 mm : gx 1.15236 gy 1.11549 bx -0.084893 by -0.196408,
+                                   isotropy 1.0331, point 2 rejected at 109 px,
+                                   median residual 21 px, worst 33 px, saved
+  verify,     eye z 630 mm, 9 mm from the fitted seat:
+                                   raw median 249 px -> CORRECTED median 33 px, worst 80 px,
+                                   WITHIN ONE DEGREE, "under 35 px, better than predicted"
+  The window's verdict matched the terminal, the mirrored dots followed the head, and Escape
+  released the keyboard. `correction.conf` is now version 2 form S.
+
+THE REFUSAL BLAMED THE LIGHTS AND THE CAUSE WAS PROXIMITY. AGAIN. `gz_missing_cause` only
+  says "too close" when the whole top row is missing, and attempt 1 kept the top centre. This
+  is the second time the same diagnostic has misled (see 2026-07-27 above). FIX IT: any of the
+  top row missing while the head is close should read as proximity.
+
+THE TOP OF THE SCREEN DROPS BECAUSE THE DEVICE LOSES THE EYES, NOT THE GAZE ESTIMATE.
+  Measured 2026-09-02 with `vendor/tobiifree/scripts/dump_gaze_columns.mjs`, which prints
+  every raw column including the flags our daemon throws away. Daemon stopped for each run.
+    top left, about 550 mm, 15 s, 496 frames : validity_L and validity_R 4 in EVERY frame,
+      eye_present (0x15/0x16) 0 in every frame, eye origins zero, gaze_2d_valid 0.
+    centre, same seat, 15 s, 495 frames      : presence reached 1 on both eyes, gaze valid
+      reached 1, last frame eye origins z 562 and 558 mm, gaze (0.481, 0.282).
+  The control is what makes the first run mean anything: an empty chair looks identical.
+  So the eye model is NOT the cause of the top drop. That points at illumination and glint
+  geometry at a steep upward angle, where the corneal reflection walks off the cornea.
+  Nothing in the vendored driver configures illumination, exposure, tracking mode or any
+  range: the handshake replays a captured 47-byte HELLO and a 20-byte SUBSCRIBE and sets
+  nothing else. If Windows keeps the corners alive at the same seat, the difference is inside
+  those two blobs or in a command nobody has captured, and settling it needs a USB capture
+  from a Windows session.
+
+FLAGS THE DAEMON THROWS AWAY, and Phase 2 wants them. The gaze packet carries `eye_present`
+  per eye (0x15/0x16), `binocular` (0x1b), `gaze_2d_valid` combined and per eye (0x1d, 0x1e,
+  0x1f), `gaze_2d_unfiltered_valid` (0x21), display-space validity (0x23, 0x26, 0x28), a
+  status field that reads 0 or 4 (0x0e), and `tracking_mode` which always reads 4 (0x11).
+  `tobiifree_core.zig` parses each for width and drops it. Our `GazeSample` carries only
+  `validity_L/R`, so nothing downstream can tell "eyes gone" from "gaze refused". Adding them
+  changes the 392-byte struct and the protocol version, so it is a scoped task, not a patch.
+
+OPEN LEAD, NOT SETTLED: THE GAIN MOVES WITH DISTANCE. Fitted vertical or overall gain against
+  eye distance, from four sessions: 450 mm 1.2275, 580 mm 1.1899, 598 mm 1.1687, and
+  2026-09-01 at about 670 mm gx 1.152 gy 1.115. Each is close to (D + 100) / D, which is what
+  a gaze ray cast from an origin about 100 mm BEHIND the eye would produce. The July claim
+  that the gain is distance-invariant rested on 580 against 598 mm, where the difference is
+  inside the noise. This does not affect the shipped correction, which is fitted per seat.
+
+USER'S OWN HYPOTHESIS, worth testing and cheap: THE DEVICE'S PHYSICAL ANGLE. `tilt_deg` and
+  `z_mm` and `cx` and `cy` in `~/.config/tobii.json` are still the daemon's template defaults
+  and have NEVER been measured (the readback reads tilt 0.00 because that is what we wrote).
+  A tracker tilted differently from what the config claims would aim its cone differently,
+  which is the top drop, and would put the screen plane at the wrong angle in the frame the
+  device intersects, which shows up as a vertical offset plus some y gain. That is the shape
+  of `by -0.196` and `gy 1.115`. What would test it: measure the tilt of the tracker's face
+  from vertical and the perpendicular distance from its front face to the screen plane, write
+  them into the config, force them onto the device with `--force-display-area`, then re-run a
+  fit at the SAME seat and compare `by` and `gy` against the numbers above.

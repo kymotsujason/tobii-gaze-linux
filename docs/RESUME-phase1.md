@@ -1,7 +1,7 @@
 # RESUME HERE: Tobii gaze overlay, Phase 1
 
 Read this first, then `docs/wip/phase1-ledger.md` for the full execution record. Last
-updated 2026-09-01 during session 4.
+updated 2026-09-02 during session 4.
 
 ## What this project is
 
@@ -68,11 +68,13 @@ A file survives a lost message.
 | 12. Display area readback gate | complete (`d432926..e6dc84a`) |
 | 14. systemd user unit | complete (`ebf87fb..91520cb`), done out of order |
 | 13. Calibration + persistence experiment | ran on hardware; it REVEALED THE DEFECT below rather than completing. Spec section 13 item 2 is not answerable as posed |
-| **13b. Host-side gaze correction** | NEW, not in the plan. Form S complete (`f3f61e2..513da1b`, reviewed clean after one fix round). **Needs one human fit** |
-| **15. Trace recorder** | code complete (`854f455..75f433e`, reviewed clean after one fix round). **Needs the human fit, then five minutes of real osu** |
+| **13b. Host-side gaze correction** | NEW, not in the plan. Form S complete (`f3f61e2..513da1b`). **Fitted and verified on hardware 2026-09-01, 33 px within one degree** |
+| **15. Trace recorder** | code complete (`854f455..75f433e`). **Unblocked. Needs five minutes of real osu** |
 | 16. Refit filter constants | blocked behind 15's recording, which produces its input |
+| **S. Track box setup view** | NEW, its own spec and plan. Complete (`35a8364..e405eb2`), four subagent tasks each reviewed, live check passed. Final whole-branch review NOT run |
 
-Every task carries a review verdict. Twelve of the sixteen closed needed a fix round first.
+Every task carries a review verdict. Twelve of the sixteen Phase 1 tasks closed needed a fix
+round first, and three of the four setup-view tasks did.
 
 ## The finding that reshaped Phase 1
 
@@ -112,10 +114,9 @@ stays. `tools/score_correction.py` mirrors it.
 
 ## What the human still has to do
 
-1. **Re-fit, because nothing works until you do.** The `correction.conf` on disk holds
-   form H parameters whose offsets are eye-relative, so form S REFUSES it: reading it as
-   form S would be wrong by about 90 px and would look like a working calibration. The
-   refusal was measured against the real file in the session 4 review. Run
+1. **Re-fit only when the seat changes.** A form S fit was made and verified on
+   2026-09-01 and `correction.conf` now holds it (gx 1.15236, gy 1.11549, verify median
+   33 px, WITHIN ONE DEGREE at 9 mm from the fitted seat). To fit again, run
    `gaze-cal setup` where you actually sit, lights on, about 600 mm back. It opens a
    fullscreen view on DP-2 that shows the tracker's own picture of both eyes, your
    distance against the 520 mm floor, and where it thinks you're looking, so you can see
@@ -124,7 +125,7 @@ stays. `tools/score_correction.py` mirrors it.
    between the two, and expect 35 to 50 px and WITHIN ONE DEGREE. Escape closes it.
    `./scripts/fit-correction.sh` is the terminal-only alternative and adds the optional
    third sweep. Re-fit whenever the seat changes for good.
-2. **Task 15's recording**, five minutes of real osu, unblocked once form S is verified.
+2. **Task 15's recording**, five minutes of real osu. Unblocked: the fit on disk is form S.
    `gaze-cal record traces/osu-YYYYMMDD.csv` records 300 seconds by default, refuses to
    run without a usable form S fit (pass `--raw` only for a smoke test, never for Task 16),
    and writes a copy of the fit beside the trace as `<path>.correction.conf`. The CSV has
@@ -268,7 +269,48 @@ ignore rules; `ws_server.zig` still has a `[4096]u8` client buffer and a silent
 `MAX_RESPONSE_PAYLOAD` and the driver test's `DAEMON_RESP_BUF` duplicate 8192 across
 modules; `Server.init` builds a roughly 1 MiB temporary by value.
 
+From Task 13b and Task 15, in `gaze-cal`: the `GZ_CORR_PARSE_BOUNDS` message names only the
+gains while `gz_correction_check` also refuses on form, on `|b| >= 1`, on a flat area and on
+a wild seat; `test_proto.c`'s missing-key loop omits `form`; a stored seat of exactly (0,0)
+prints "the head is still at the fitted seat" without basis; `fit-correction.sh:17` says 0.66
+px per mm where `proto.h` says 0.63; `score_correction.py` names the lowest-index survivor on
+a post-refit refusal while the C names the largest residual; spec section 2.3 does not yet
+describe the post-refit refusal; `record.c`'s per-eye path divides by gains checked only for
+zero; `--seconds` still swallows a following path as its value; `traces/README.md` does not
+say the eye columns are the CALIBRATED `eye_origin_*_mm` rather than the raw or display
+variants.
+
+From the setup-view plan, and these are only in this file since `.superpowers/` is
+gitignored: `calibrate.h`'s comment on the verdict gains should say a failed SAVE keeps them
+while `refused` is 1; `gz_missing_verdict_fill` on a complete sweep prints an empty missing
+list; `gz_fit_verdict_fill` divides by an unguarded `mm_per_px`; a `snprintf` with a
+non-literal format string; `report_corrected` walks the sweep twice; the gate and
+interrupted-sweep fills have no test. In `stimulus.c`: a failed keyboard grab flashes a black
+window for up to 200 ms, and `gz_stimulus_show`, `_blank` and `_screen` still dereference a
+NULL handle. In `view.c`: the `fired` clear on the gap reset is untested, the 150 and 250 px
+radii are not pinned by a test, `gz_view_fit_stamp` can false-match a line past its 256-byte
+buffer, `gz_zfit_add` accepts a non-finite box z, and `run_action` drops the reconnect return
+value. In `setup.c`: the dwell ring keeps sweeping from frozen state after the stream dies
+(cosmetic, it cannot fire), the readout room test uses a fixed 4 px margin rather than the
+font descent, and `no_eyes` doubles as the stale-link state so an unplugged tracker reads as
+a room-lights hint.
+
+**The setup-view plan's final whole-branch review was never run**, by the user's call on
+2026-09-02. The list above is what it would have triaged.
+
 ## Still unknown, and only answerable on hardware
+
+0. **Why the top of the screen drops at a close seat, and whether Windows avoids it.**
+   Measured 2026-09-02: at about 550 mm, looking top left, the device reported NO EYES for
+   496 consecutive frames (`eye_present` 0 on both, origins zero), while the same seat looking
+   at the centre had both eyes present with gaze valid. So it is eye DETECTION that fails, not
+   the gaze estimate, which rules the eye model out and points at illumination and glint
+   geometry at a steep upward angle. Nothing in the vendored driver configures illumination,
+   exposure or mode, so the difference against Windows, if there is one, is inside the two
+   captured handshake blobs or in a command nobody has captured. Settling it needs a USB
+   capture from a Windows session. The live lead is the tracker's PHYSICAL ANGLE, since
+   `tilt_deg`, `z_mm`, `cx` and `cy` in `~/.config/tobii.json` have never been measured; see
+   the 2026-09-02 ledger entry for what to measure and how to test it.
 
 1. Whether calibration survives a replug. Task 13's experiment decides whether
    `gaze-cal --apply-saved` is mandatory or merely harmless

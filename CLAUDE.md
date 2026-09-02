@@ -58,6 +58,9 @@ Every row below was an assumption that measurement disproved.
 | Zig 0.14+ (tobiifree README) | **0.15.x only.** 0.14 fails on unmanaged `ArrayList`, 0.16 removes `std.process.args`, `std.posix.getenv`, `std.fs.cwd` |
 | Per-eye offset up to 45 px | **67 x 40 px** (78 combined) |
 | ET5 needs Windows setup first | **It does not.** Handshake completes in 4 steps on a factory device |
+| The top of the screen drops because the tracker won't estimate gaze there | **No, it loses the EYES.** At 550 mm looking top left, `eye_present` was 0 on both eyes for 496 straight frames; the same seat looking at the centre had both eyes and valid gaze. Illumination and glint geometry, not the eye model |
+| `trackbox_eye_pos_L/R` (0x03/0x09) are unusable | **They work.** 0 to 1, 0.5 on the centre line, exactly 0 when that eye is invalid. `gaze-cal setup` draws them. **Box x grows towards the user's LEFT**, so mirror it: right eye at tracker x +46 mm reads 0.39, left eye at -17 mm reads 0.54 |
+| The 1.18 gain is distance-invariant | **Unsettled, and probably not.** Fitted gains: 1.2275 at 450 mm, 1.1899 at 580, 1.1687 at 598, 1.15/1.12 at 670. Each is near `(D + 100) / D`. The July claim rested on 580 against 598, inside the noise |
 
 `ARCHITECTURE.md` in the vendored driver is also wrong about four opcodes and invents a
 `cal_retrieve` at `0x23` that is actually `cal_apply`. **`driver/src/daemon_protocol.zig`
@@ -161,12 +164,22 @@ as the output's `PT_INTERP` and that loader does not search `/usr/lib`:
   An independent `get_display_area` moments later read the correct 597 x 336. Never trust
   a readback taken immediately after a write; let it settle, and verify with the client
   rather than the daemon's own log line.
-- It now holds the real **597 x 336 mm**, written during Task 5, reading back as
-  `TL=(-299,346,0) TR=(299,346,0) BL=(-299,10,0)`. Only `w_mm` and `h_mm` are measured; `z_mm`, `tilt`,
-  `cx` and `cy` in `~/.config/tobii.json` are still the daemon's template defaults, and
-  Task 13 must measure them before calibration is trusted, because calibration is computed
-  in that frame. `isReset()` only fires below 50 mm, so a wrong-but-plausible geometry is
-  otherwise unfixable, which is what `--force-display-area` is for.
+- It now holds the real **590.42 x 333.72 mm**, the DP-2 active area, reading back as
+  `origin=(-295.21, 5.0) z=-7.5 tilt=0.00` on 2026-09-01. The 597 x 336 written during Task 5
+  was the adjacent monitor's size and has since been corrected. `isReset()` only fires below
+  50 mm, so a wrong-but-plausible geometry is otherwise unfixable, which is what
+  `--force-display-area` is for.
+- **The gaze packet carries validity flags the driver throws away.** `eye_present` per eye
+  (0x15/0x16), `binocular` (0x1b), `gaze_2d_valid` combined and per eye (0x1d/0x1e/0x1f),
+  `gaze_2d_unfiltered_valid` (0x21), display-space validity (0x23/0x26/0x28), a 0-or-4 status
+  (0x0e), and `tracking_mode` which always reads 4 (0x11). `tobiifree_core.zig` parses each
+  for width and drops it, so `GazeSample` has only `validity_L/R` and nothing downstream can
+  tell "eyes gone" from "gaze refused". Adding them changes the 392-byte struct and the
+  protocol version. Read them live with `vendor/tobiifree/scripts/dump_gaze_columns.mjs`,
+  which needs the wasm core built and the daemon stopped.
+- **`z_mm`, `tilt_deg`, `cx` and `cy` in `~/.config/tobii.json` have never been measured.**
+  They are the daemon's template defaults, and a readback cannot tell an unmeasured 0 from a
+  measured one. Only `w_mm` and `h_mm` are real.
 - **The daemon never emits a `display_area` (0x03) frame.** A `get_display_area` reply
   comes back as a `response` (0x02) with `cmd_type` 0x02 and a 164-byte raw TTP body, not
   as doubles. Confirmed live in Task 10. The plan says otherwise and the plan is wrong.
