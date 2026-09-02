@@ -45,6 +45,13 @@ void gz_screen_point_px(const struct gz_screen *s, double nx, double ny,
 #define GZ_CAL_POINTS 9
 extern const double GZ_CAL_PTS[GZ_CAL_POINTS][2];
 
+/* One degree is 45 px on DP-2 at 600 mm, which is the plan's yardstick. The
+ * degrees a sweep prints are computed from the measured eye distance instead
+ * whenever the frame carried one, so a session at a different distance is not
+ * judged against someone else's geometry. Here rather than in calibrate.c
+ * because the verdict fills and the setup view are both judged against it. */
+#define GZ_ACC_TARGET_PX 45.0
+
 /* ---------------- the blob on disk ----------------
  *
  * Nothing in the daemon persists a calibration. Its saved_cal is a
@@ -267,6 +274,77 @@ struct gz_fit_report {
     double eye_proj[2];
 };
 
+/* ---------------- one nine-point sweep ----------------
+ *
+ * In the header rather than in calibrate.c because gz_corrected_stats reads a
+ * sweep and tests/test_calibrate.c builds one by hand to check it. Filled by
+ * the sweep runner, which is the only writer.
+ *
+ * `gaze_med` is the per-axis median the human table prints and `gaze_mean` is
+ * the mean over the frames that carried both a gaze point and an eye
+ * midpoint, which is what the fit and every corrected figure use. `n_fit` is
+ * how many of those paired frames there were, so `n_fit == 0` means the point
+ * carried no usable pair at all. */
+struct gz_sweep_point {
+    double target[2];        /* normalised display coordinates */
+    double gaze_med[2];      /* per-axis median, what the human table prints */
+    double gaze_mean[2];     /* mean over the paired frames, what the fit uses */
+    double eye_mm[3];        /* mean eye midpoint over those same frames */
+    unsigned frames, n_gaze, n_fit;
+    double err_px;           /* from the median, or -1 when no gaze landed */
+};
+
+struct gz_sweep {
+    struct gz_sweep_point pt[GZ_CAL_POINTS];
+    int n_gaze_ok, n_fit_ok;
+    double zbuf[GZ_SAMPLE_CAP];
+    unsigned nz;
+};
+
+/* ---------------- what one sweep decided ---------------- */
+
+#define GZ_VERDICT_FIT      1
+#define GZ_VERDICT_ACCURACY 2
+
+/* What one sweep decided, in the numbers the setup view draws. The cores fill
+ * it and keep printing everything they print today, so this is the same result
+ * in a form a window can show without a terminal. */
+struct gz_sweep_verdict {
+    int    kind;                /* GZ_VERDICT_FIT or GZ_VERDICT_ACCURACY */
+    int    rc;                  /* the command's exit code, 0 on success */
+    int    refused;             /* 1 when nothing usable came out of the sweep */
+    int    n_used, n_rejected;
+    double median_px, worst_px; /* corrected when a correction applied, else raw */
+    int    within_one_degree;   /* median_px <= GZ_ACC_TARGET_PX */
+    int    corrected;           /* accuracy: 1 when the figures are corrected ones */
+    double gx, gy, bx, by;      /* fit only, zero otherwise */
+    double moved_mm;            /* accuracy: head distance from the fitted seat, -1 unknown */
+    char   reason[200];         /* plain words on refusal, "" otherwise */
+    char   next[120];           /* what to do next, always set */
+};
+
+/* Corrected error statistics over one sweep, the numbers report_corrected
+ * prints. Returns the number of points that carried both a gaze sample and an
+ * eye position, 0 when none did (out is zeroed then). */
+struct gz_corr_stats {
+    unsigned n;
+    double   median_px, worst_px, raw_median_px;
+    double   moved_mm;          /* -1 when the fit recorded no seat */
+};
+unsigned gz_corrected_stats(const struct gz_sweep *sw, const struct gz_screen *scr,
+                            const struct gz_correction *corr, struct gz_corr_stats *out);
+
+/* Pure fills, so the words in the window come from the same place as the
+ * words on the terminal. */
+void gz_fit_verdict_fill(int fit_rc, const struct gz_fit_report *rep,
+                         const struct gz_correction *corr, double mm_per_px,
+                         struct gz_sweep_verdict *out);
+void gz_missing_verdict_fill(const struct gz_sweep *sw, struct gz_sweep_verdict *out);
+void gz_accuracy_verdict_fill(int have_corr, const struct gz_corr_stats *cs,
+                              double raw_median_px, double raw_worst_px,
+                              struct gz_sweep_verdict *out);
+const char *gz_fit_err_text(int rc);
+
 /* Two univariate ordinary least squares of reported on target, one per axis.
  * Form S: no eye term, because spec test 5.3 measured the eye-relative form
  * losing at a displaced seat. Each point's eye position is still read, for the
@@ -345,6 +423,15 @@ int gz_cmd_accuracy(const char *sock, const char *cfg, const char *label,
                     const struct gz_stim_ops *stim, const struct gz_screen *scr);
 int gz_cmd_fit(const char *sock, const char *cfg,
                const struct gz_stim_ops *stim, const struct gz_screen *scr);
+
+/* The cores behind the two commands above. Same behaviour and same printed
+ * output, plus the filled verdict. `out` is always written, including on a
+ * gate failure, where rc carries the gate code and refused is 1. */
+int gz_fit_core(const char *sock, const char *cfg, const struct gz_stim_ops *stim,
+                const struct gz_screen *scr, struct gz_sweep_verdict *out);
+int gz_accuracy_core(const char *sock, const char *cfg, const char *label,
+                     const struct gz_stim_ops *stim, const struct gz_screen *scr,
+                     struct gz_sweep_verdict *out);
 int gz_cmd_probe(const char *sock, const char *cfg,
                  const struct gz_stim_ops *stim, const struct gz_screen *scr);
 int gz_cmd_apply_saved(const char *sock);

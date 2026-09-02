@@ -1180,31 +1180,12 @@ int gz_cmd_apply_saved(const char *sock) {
  * spec test 5.3 was scored from, and they are what says how far a later sweep
  * sat from the seat the fit belongs to. */
 
-/* One degree is 45 px on DP-2 at 600 mm, which is the plan's yardstick. The
- * degrees below are computed from the measured eye distance instead whenever
- * the frame carried one, so a session at a different distance is not judged
- * against someone else's geometry. */
-#define GZ_ACC_TARGET_PX 45.0
-
-/* Settle, then measure. Split so the validity window excludes the saccade. */
+/* GZ_ACC_TARGET_PX, the one-degree yardstick these figures are judged against,
+ * is in calibrate.h: the verdict fills need it too.
+ *
+ * Settle, then measure. Split so the validity window excludes the saccade. */
 #define GZ_SWEEP_SETTLE_MS 700
 #define GZ_SWEEP_SAMPLE_MS 600
-
-struct gz_sweep_point {
-    double target[2];        /* normalised display coordinates */
-    double gaze_med[2];      /* per-axis median, what the human table prints */
-    double gaze_mean[2];     /* mean over the paired frames, what the fit uses */
-    double eye_mm[3];        /* mean eye midpoint over those same frames */
-    unsigned frames, n_gaze, n_fit;
-    double err_px;           /* from the median, or -1 when no gaze landed */
-};
-
-struct gz_sweep {
-    struct gz_sweep_point pt[GZ_CAL_POINTS];
-    int n_gaze_ok, n_fit_ok;
-    double zbuf[GZ_SAMPLE_CAP];
-    unsigned nz;
-};
 
 static int run_sweep(struct gz_client *c, const struct gz_stim_ops *stim,
                      const struct gz_screen *scr, struct gz_rect panel,
@@ -1312,22 +1293,27 @@ static int run_sweep(struct gz_client *c, const struct gz_stim_ops *stim,
 
 /* ---------------- accuracy ---------------- */
 
-/* Reports the sweep against the correction currently on disk, when there is
- * one. Uses the paired means rather than the medians the table above prints,
- * because the correction is affine in both the gaze point and the eye position,
- * so correcting the mean is exactly the mean of the corrected samples. The raw
- * column here is recomputed from the same means, so the two columns are
- * comparable to each other rather than to the table. */
-static void report_corrected(const struct gz_sweep *sw, const struct gz_screen *scr,
-                             const struct gz_correction *corr) {
-    say("\n  correction applied: gx %.5f gy %.5f bx %+.6f by %+.6f (form S)\n",
-        corr->gx, corr->gy, corr->bx, corr->by);
-    say("  point         raw px   corrected px\n");
+/* The acceptance bands, in corrected median pixels, and the movement that
+ * explains the middle one. Named once because report_corrected prints them and
+ * gz_accuracy_verdict_fill fills the same words from them, and two copies of a
+ * threshold drift. The movement one is in PIXELS of predicted decay rather
+ * than in millimetres: 15 px is 24 mm at GZ_CORR_DEGRADE_PX_PER_MM. */
+#define GZ_ACC_FALSIFIED_PX 80.0
+#define GZ_ACC_MIDBAND_PX   50.0
+#define GZ_ACC_PREDICTED_PX 35.0
+#define GZ_ACC_MOVED_PX     15.0
+
+unsigned gz_corrected_stats(const struct gz_sweep *sw, const struct gz_screen *scr,
+                            const struct gz_correction *corr, struct gz_corr_stats *out) {
+    memset(out, 0, sizeof *out);
+    out->moved_mm = -1;
 
     double raws[GZ_CAL_POINTS], cors[GZ_CAL_POINTS];
     double eye_sum[2] = { 0, 0 };
     unsigned n = 0;
     double worst = 0;
+    /* gz_stat_of sorts in place, so every per-point number is taken here and
+     * the two medians are computed once the loop is done. */
     for (int i = 0; i < GZ_CAL_POINTS; i++) {
         const struct gz_sweep_point *p = &sw->pt[i];
         if (p->n_fit == 0) continue;
@@ -1337,62 +1323,160 @@ static void report_corrected(const struct gz_sweep *sw, const struct gz_screen *
         eye_sum[0] += ep[0];
         eye_sum[1] += ep[1];
         gz_correct_point(corr, p->gaze_mean, cor);
+        raws[n] = hypot((p->gaze_mean[0] - p->target[0]) * scr->w,
+                        (p->gaze_mean[1] - p->target[1]) * scr->h);
+        cors[n] = hypot((cor[0] - p->target[0]) * scr->w,
+                        (cor[1] - p->target[1]) * scr->h);
+        if (cors[n] > worst) worst = cors[n];
+        n++;
+    }
+    if (n == 0) return 0;
 
+    out->n = n;
+    out->median_px = gz_stat_of(cors, n).median;
+    out->raw_median_px = gz_stat_of(raws, n).median;
+    out->worst_px = worst;
+    if (corr->eye_proj[0] != 0.0 || corr->eye_proj[1] != 0.0) {
+        double dx = (eye_sum[0] / n - corr->eye_proj[0]) * corr->area.w_mm;
+        double dy = (eye_sum[1] / n - corr->eye_proj[1]) * corr->area.h_mm;
+        out->moved_mm = hypot(dx, dy);
+    }
+    return n;
+}
+
+/* Reports the sweep against the correction currently on disk, when there is
+ * one. Uses the paired means rather than the medians the table above prints,
+ * because the correction is affine in both the gaze point and the eye position,
+ * so correcting the mean is exactly the mean of the corrected samples. The raw
+ * column here is recomputed from the same means, so the two columns are
+ * comparable to each other rather than to the table.
+ *
+ * `out` is not optional and is always written, so the caller has the same
+ * numbers this printed without walking the sweep a second time. */
+static void report_corrected(const struct gz_sweep *sw, const struct gz_screen *scr,
+                             const struct gz_correction *corr,
+                             struct gz_corr_stats *out) {
+    say("\n  correction applied: gx %.5f gy %.5f bx %+.6f by %+.6f (form S)\n",
+        corr->gx, corr->gy, corr->bx, corr->by);
+    say("  point         raw px   corrected px\n");
+
+    for (int i = 0; i < GZ_CAL_POINTS; i++) {
+        const struct gz_sweep_point *p = &sw->pt[i];
+        if (p->n_fit == 0) continue;
+
+        double cor[2];
+        gz_correct_point(corr, p->gaze_mean, cor);
         double rawe = hypot((p->gaze_mean[0] - p->target[0]) * scr->w,
                             (p->gaze_mean[1] - p->target[1]) * scr->h);
         double core = hypot((cor[0] - p->target[0]) * scr->w,
                             (cor[1] - p->target[1]) * scr->h);
         say("  %d/%d (%.1f,%.1f) %8.0f %12.0f\n",
             i + 1, GZ_CAL_POINTS, p->target[0], p->target[1], rawe, core);
-        raws[n] = rawe;
-        cors[n] = core;
-        if (core > worst) worst = core;
-        n++;
     }
-    if (n == 0) {
+
+    gz_corrected_stats(sw, scr, corr, out);
+    if (out->n == 0) {
         say("  no point carried both a gaze sample and an eye position\n");
         return;
     }
 
-    struct gz_stat rs = gz_stat_of(raws, n);
-    struct gz_stat cs = gz_stat_of(cors, n);
     say("\nCORRECTED median %.0f px, worst %.0f px, over %u points"
-        " (raw median %.0f px)\n", cs.median, worst, n, rs.median);
+        " (raw median %.0f px)\n", out->median_px, out->worst_px, out->n,
+        out->raw_median_px);
     say("verdict: %s (target %.0f px, one degree at 600 mm)\n",
-        cs.median <= GZ_ACC_TARGET_PX ? "WITHIN ONE DEGREE" : "OUTSIDE ONE DEGREE",
+        out->median_px <= GZ_ACC_TARGET_PX ? "WITHIN ONE DEGREE" : "OUTSIDE ONE DEGREE",
         GZ_ACC_TARGET_PX);
 
     /* How far this sweep sat from the seat the fit was taken at, and what form
      * S costs for it. This is the first thing to check on a degraded run, and
      * with form S it is the only term that moved. */
     double moved_px = -1;
-    if (corr->eye_proj[0] != 0.0 || corr->eye_proj[1] != 0.0) {
-        double dx = (eye_sum[0] / n - corr->eye_proj[0]) * corr->area.w_mm;
-        double dy = (eye_sum[1] / n - corr->eye_proj[1]) * corr->area.h_mm;
-        double moved_mm = hypot(dx, dy);
-        moved_px = moved_mm * GZ_CORR_DEGRADE_PX_PER_MM;
+    if (out->moved_mm >= 0.0) {
+        moved_px = out->moved_mm * GZ_CORR_DEGRADE_PX_PER_MM;
         say("head moved %.0f mm in the screen plane from the seat this fit was"
             " taken at,\n  which costs form S about %.0f px at %.2f px/mm."
             " Depth costs nothing.\n",
-            moved_mm, moved_px, GZ_CORR_DEGRADE_PX_PER_MM);
+            out->moved_mm, moved_px, GZ_CORR_DEGRADE_PX_PER_MM);
     }
 
     /* Reported rather than judged into a single pass or fail: the middle band
      * has a specific and checkable cause under form S, and it is printed just
      * above rather than left for the operator to guess at. */
     say("acceptance: %s\n",
-        cs.median > 80.0 ? "ABOVE 80 px, the affine model is FALSIFIED"
-      : cs.median > 50.0 ? (moved_px > 15.0
+        out->median_px > GZ_ACC_FALSIFIED_PX
+            ? "ABOVE 80 px, the affine model is FALSIFIED"
+      : out->median_px > GZ_ACC_MIDBAND_PX ? (moved_px > GZ_ACC_MOVED_PX
             ? "50 to 80 px, and the head has left the fitted seat: re-fit where"
               " you actually sit"
             : "50 to 80 px with the head still at the fitted seat, so movement"
               " does not explain it")
-      : cs.median >= 35.0 ? "35 to 50 px, as predicted"
+      : out->median_px >= GZ_ACC_PREDICTED_PX ? "35 to 50 px, as predicted"
                           : "under 35 px, better than predicted");
 }
 
-int gz_cmd_accuracy(const char *sock, const char *cfg, const char *label,
-                    const struct gz_stim_ops *stim, const struct gz_screen *scr) {
+/* The two gate refusals, which are the same words for both commands and are
+ * kept apart for the same reason display.h keeps the codes apart: only the
+ * mismatch has a remedy. */
+static void gate_verdict_fill(int kind, int g, struct gz_sweep_verdict *out) {
+    memset(out, 0, sizeof *out);
+    out->kind = kind;
+    out->rc = g;
+    out->refused = 1;
+    out->moved_mm = -1;
+    if (g == GZ_GATE_MISMATCH) {
+        snprintf(out->reason, sizeof out->reason,
+                 "the device does not hold the configured display area");
+        snprintf(out->next, sizeof out->next,
+                 "fix it with tobiifreed --force-display-area, then run this again");
+    } else {
+        snprintf(out->reason, sizeof out->reason,
+                 "the daemon didn't answer, so the display area could not be read");
+        snprintf(out->next, sizeof out->next,
+                 "start tobiifreed, then run this again");
+    }
+}
+
+void gz_accuracy_verdict_fill(int have_corr, const struct gz_corr_stats *cs,
+                              double raw_median_px, double raw_worst_px,
+                              struct gz_sweep_verdict *out) {
+    memset(out, 0, sizeof *out);
+    out->kind = GZ_VERDICT_ACCURACY;
+    out->moved_mm = -1;
+    if (!have_corr || cs == NULL || cs->n == 0) {
+        out->median_px = raw_median_px;
+        out->worst_px = raw_worst_px;
+        out->within_one_degree = raw_median_px <= GZ_ACC_TARGET_PX;
+        snprintf(out->next, sizeof out->next,
+                 "these are the device's raw numbers. Run a fit");
+        return;
+    }
+    out->corrected = 1;
+    out->n_used = (int)cs->n;
+    out->median_px = cs->median_px;
+    out->worst_px = cs->worst_px;
+    out->within_one_degree = cs->median_px <= GZ_ACC_TARGET_PX;
+    out->moved_mm = cs->moved_mm;
+
+    /* The same bands, in the same order, off the same constants as the
+     * acceptance line above, including the middle one splitting on the cost in
+     * pixels rather than on the millimetres themselves. */
+    double moved_px = cs->moved_mm >= 0.0 ? cs->moved_mm * GZ_CORR_DEGRADE_PX_PER_MM : -1;
+    if (cs->median_px > GZ_ACC_FALSIFIED_PX) {
+        snprintf(out->next, sizeof out->next, "above 80 px: the affine model is FALSIFIED");
+    } else if (cs->median_px > GZ_ACC_MIDBAND_PX) {
+        snprintf(out->next, sizeof out->next, moved_px > GZ_ACC_MOVED_PX
+                 ? "50 to 80 px and the head has left the fitted seat: re-fit where you sit"
+                 : "50 to 80 px with the head at the fitted seat, so movement does not explain it");
+    } else if (cs->median_px >= GZ_ACC_PREDICTED_PX) {
+        snprintf(out->next, sizeof out->next, "35 to 50 px, as predicted");
+    } else {
+        snprintf(out->next, sizeof out->next, "under 35 px, better than predicted");
+    }
+}
+
+int gz_accuracy_core(const char *sock, const char *cfg, const char *label,
+                     const struct gz_stim_ops *stim, const struct gz_screen *scr,
+                     struct gz_sweep_verdict *out) {
     log_open("accuracy", label);
     say("screen: %s %dx%d at +%d+%d\n", scr->name, scr->w, scr->h, scr->x, scr->y);
 
@@ -1400,6 +1484,7 @@ int gz_cmd_accuracy(const char *sock, const char *cfg, const char *label,
     struct gz_rect panel;
     int g = gz_connect_and_gate(&c, sock, cfg, 1, &panel);
     if (g != GZ_GATE_OK) {
+        gate_verdict_fill(GZ_VERDICT_ACCURACY, g, out);
         gz_client_close(&c);
         log_close();
         return g;
@@ -1416,6 +1501,13 @@ int gz_cmd_accuracy(const char *sock, const char *cfg, const char *label,
 
     struct gz_sweep sw;
     if (run_sweep(&c, stim, scr, panel, &sw) != 0) {
+        memset(out, 0, sizeof *out);
+        out->kind = GZ_VERDICT_ACCURACY;
+        out->rc = 1;
+        out->refused = 1;
+        out->moved_mm = -1;
+        snprintf(out->reason, sizeof out->reason, "the sweep was interrupted");
+        snprintf(out->next, sizeof out->next, "re-run the sweep");
         gz_client_close(&c);
         log_close();
         return 1;
@@ -1425,6 +1517,13 @@ int gz_cmd_accuracy(const char *sock, const char *cfg, const char *label,
         say("\nNO VALID GAZE AT ANY POINT. Either nobody was looking at the screen or\n"
             "the tracker is not seeing eyes. Nothing here says anything about\n"
             "calibration.\n");
+        memset(out, 0, sizeof *out);
+        out->kind = GZ_VERDICT_ACCURACY;
+        out->rc = 1;
+        out->refused = 1;
+        out->moved_mm = -1;
+        snprintf(out->reason, sizeof out->reason, "no valid gaze at any point");
+        snprintf(out->next, sizeof out->next, "look at each dot, with the lights on");
         gz_client_close(&c);
         log_close();
         return 1;
@@ -1450,10 +1549,12 @@ int gz_cmd_accuracy(const char *sock, const char *cfg, const char *label,
         have_corr ? "BEFORE CORRECTION: " : "", es.median, worst,
         sw.n_gaze_ok, GZ_CAL_POINTS);
     if (sw.nz > 0) say("eye distance |z| median %.0f mm\n", fabs(zs.median));
+    struct gz_corr_stats cs;
+    memset(&cs, 0, sizeof cs);
     if (have_corr) {
         say("this is the device's raw output, not the result. The corrected\n"
             "figures are below.\n");
-        report_corrected(&sw, scr, &corr);
+        report_corrected(&sw, scr, &corr, &cs);
     } else {
         say("verdict: %s (target %.0f px, one degree at 600 mm)\n",
             es.median <= GZ_ACC_TARGET_PX ? "WITHIN ONE DEGREE" : "OUTSIDE ONE DEGREE",
@@ -1461,10 +1562,17 @@ int gz_cmd_accuracy(const char *sock, const char *cfg, const char *label,
         say("\nno host-side correction on disk. The numbers above are the device's\n"
             "raw output. Run `gaze-cal fit` to fit one.\n");
     }
+    gz_accuracy_verdict_fill(have_corr, &cs, es.median, worst, out);
 
     gz_client_close(&c);
     log_close();
     return 0;
+}
+
+int gz_cmd_accuracy(const char *sock, const char *cfg, const char *label,
+                    const struct gz_stim_ops *stim, const struct gz_screen *scr) {
+    struct gz_sweep_verdict v;
+    return gz_accuracy_core(sock, cfg, label, stim, scr, &v);
 }
 
 /* ---------------- fit ---------------- */
@@ -1525,7 +1633,7 @@ static void say_missing_points(const struct gz_sweep *sw) {
     }
 }
 
-static const char *fit_err_text(int rc) {
+const char *gz_fit_err_text(int rc) {
     switch (rc) {
     case GZ_FIT_ERR_POINTS:  return "too few usable points";
     case GZ_FIT_ERR_FLAT:    return "the stimulus did not span an axis";
@@ -1536,8 +1644,77 @@ static const char *fit_err_text(int rc) {
     }
 }
 
-int gz_cmd_fit(const char *sock, const char *cfg,
-               const struct gz_stim_ops *stim, const struct gz_screen *scr) {
+void gz_fit_verdict_fill(int fit_rc, const struct gz_fit_report *rep,
+                         const struct gz_correction *corr, double mm_per_px,
+                         struct gz_sweep_verdict *out) {
+    memset(out, 0, sizeof *out);
+    out->kind = GZ_VERDICT_FIT;
+    out->n_used = rep->n_used;
+    out->n_rejected = rep->n_rejected;
+    out->median_px = rep->median_resid_mm / mm_per_px;
+    out->worst_px = rep->worst_resid_mm / mm_per_px;
+    out->within_one_degree = out->median_px <= GZ_ACC_TARGET_PX;
+    out->moved_mm = -1;
+    if (fit_rc != GZ_FIT_OK) {
+        out->rc = 1;
+        out->refused = 1;
+        /* The same point the terminal names, and the same one-based number. */
+        if (fit_rc == GZ_FIT_ERR_REFIT && rep->refit_outlier >= 0) {
+            snprintf(out->reason, sizeof out->reason,
+                     "%s: point %d survived the rejection and still sits past 3x the median",
+                     gz_fit_err_text(fit_rc), rep->refit_outlier + 1);
+        } else {
+            snprintf(out->reason, sizeof out->reason, "%s", gz_fit_err_text(fit_rc));
+        }
+        snprintf(out->next, sizeof out->next,
+                 "nothing was written. Re-run the sweep, holding each dot until it moves");
+        return;
+    }
+    out->gx = corr->gx; out->gy = corr->gy; out->bx = corr->bx; out->by = corr->by;
+    snprintf(out->next, sizeof out->next, "now verify, without moving");
+}
+
+/* The partial sweep, in the words say_missing_points prints. */
+void gz_missing_verdict_fill(const struct gz_sweep *sw, struct gz_sweep_verdict *out) {
+    memset(out, 0, sizeof *out);
+    out->kind = GZ_VERDICT_FIT;
+    out->rc = 1;
+    out->refused = 1;
+    out->moved_mm = -1;
+
+    int paired[GZ_CAL_POINTS];
+    double z[GZ_CAL_POINTS];
+    char list[64] = "";
+    size_t at = 0;
+    for (int i = 0; i < GZ_CAL_POINTS; i++) {
+        paired[i] = sw->pt[i].n_fit > 0;
+        z[i] = sw->pt[i].eye_mm[2];
+        if (paired[i]) continue;
+        int w = snprintf(list + at, sizeof list - at, "%s%d", at ? ", " : "", i + 1);
+        if (w > 0 && (size_t)w < sizeof list - at) at += (size_t)w;
+    }
+    snprintf(out->reason, sizeof out->reason,
+             "only %d of %d points carried a gaze sample and an eye position (missing %s)",
+             sw->n_fit_ok, GZ_CAL_POINTS, list);
+
+    double med = 0;
+    int cause = gz_missing_cause(paired, z, GZ_CAL_POINTS, &med);
+    if (cause == GZ_MISS_TOO_CLOSE) {
+        snprintf(out->next, sizeof out->next,
+                 "too close at %.0f mm: the top row is outside the tracker's view."
+                 " Sit at about 600 mm", med);
+    } else if (cause == GZ_MISS_CLOSE) {
+        snprintf(out->next, sizeof out->next,
+                 "at %.0f mm, closer than the 600 mm playing position. Move back,"
+                 " then the lights", med);
+    } else {
+        snprintf(out->next, sizeof out->next,
+                 "turn the room lights on: with them off this tracker loses the top left point");
+    }
+}
+
+int gz_fit_core(const char *sock, const char *cfg, const struct gz_stim_ops *stim,
+                const struct gz_screen *scr, struct gz_sweep_verdict *out) {
     log_open("fit", NULL);
     say("screen: %s %dx%d at +%d+%d\n", scr->name, scr->w, scr->h, scr->x, scr->y);
 
@@ -1545,6 +1722,7 @@ int gz_cmd_fit(const char *sock, const char *cfg,
     struct gz_rect panel;
     int g = gz_connect_and_gate(&c, sock, cfg, 1, &panel);
     if (g != GZ_GATE_OK) {
+        gate_verdict_fill(GZ_VERDICT_FIT, g, out);
         gz_client_close(&c);
         log_close();
         return g;
@@ -1559,6 +1737,13 @@ int gz_cmd_fit(const char *sock, const char *cfg,
 
     struct gz_sweep sw;
     if (run_sweep(&c, stim, scr, panel, &sw) != 0) {
+        memset(out, 0, sizeof *out);
+        out->kind = GZ_VERDICT_FIT;
+        out->rc = 1;
+        out->refused = 1;
+        out->moved_mm = -1;
+        snprintf(out->reason, sizeof out->reason, "the sweep was interrupted");
+        snprintf(out->next, sizeof out->next, "re-run the sweep");
         gz_client_close(&c);
         log_close();
         return 1;
@@ -1573,6 +1758,7 @@ int gz_cmd_fit(const char *sock, const char *cfg,
             "REFUSING TO FIT. A fit from a partial sweep encodes which points were\n"
             "missing rather than the gain.\n", sw.n_fit_ok, GZ_CAL_POINTS);
         say_missing_points(&sw);
+        gz_missing_verdict_fill(&sw, out);
         log_close();
         return 1;
     }
@@ -1596,6 +1782,7 @@ int gz_cmd_fit(const char *sock, const char *cfg,
     say("points used %d of %d, rejected %d\n", rep.n_used, rep.n_in, rep.n_rejected);
 
     double mm_per_px = panel.w_mm / (double)scr->w;
+    gz_fit_verdict_fill(rc, &rep, &corr, mm_per_px, out);
     say("per-point residual, corrected minus target:\n");
     for (int i = 0; i < GZ_CAL_POINTS; i++) {
         say("  pt %d  %6.1f mm  %6.0f px%s\n", i + 1, rep.resid_mm[i],
@@ -1608,7 +1795,7 @@ int gz_cmd_fit(const char *sock, const char *cfg,
     if (rc != GZ_FIT_OK) {
         say("\nFIT REFUSED: %s.\n"
             "Nothing was written. A wrong correction is worse than none, because\n"
-            "downstream it is indistinguishable from a calibration.\n", fit_err_text(rc));
+            "downstream it is indistinguishable from a calibration.\n", gz_fit_err_text(rc));
         if (rc == GZ_FIT_ERR_REFIT && rep.refit_outlier >= 0) {
             say("POINT %d is the one. It survived the rejection above and still sits\n"
                 "past 3x the median, which means this sweep has a second bad point\n"
@@ -1622,6 +1809,10 @@ int gz_cmd_fit(const char *sock, const char *cfg,
     }
 
     if (gz_correction_save(&corr, &rep, rep.eye_z_mm, mm_per_px) != 0) {
+        out->rc = 1;
+        out->refused = 1;
+        snprintf(out->reason, sizeof out->reason, "couldn't write the correction file");
+        snprintf(out->next, sizeof out->next, "check the disk, then re-run the fit");
         log_close();
         return 1;
     }
@@ -1634,6 +1825,12 @@ int gz_cmd_fit(const char *sock, const char *cfg,
         "either, because the correction has no depth term.\n");
     log_close();
     return 0;
+}
+
+int gz_cmd_fit(const char *sock, const char *cfg,
+               const struct gz_stim_ops *stim, const struct gz_screen *scr) {
+    struct gz_sweep_verdict v;
+    return gz_fit_core(sock, cfg, stim, scr, &v);
 }
 
 /* ---------------- probe ----------------

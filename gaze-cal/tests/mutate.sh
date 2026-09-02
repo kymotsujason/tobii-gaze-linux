@@ -941,6 +941,42 @@ run_mutation "residual provenance written in millimetres" calibrate.c \
     "                            \"fit_median_resid_mm=%.1f\\nfit_worst_resid_mm=%.1f\\n\","
 
 
+# The sweep verdicts. Nothing prints them yet, so a wrong field would sit there
+# until the setup view drew it, which is where it would be hardest to see.
+run_mutation "fit verdict does not mark a refusal" calibrate.c \
+    "        out->refused = 1;
+        /* The same point the terminal names, and the same one-based number. */" \
+    "        out->refused = 0;
+        /* The same point the terminal names, and the same one-based number. */"
+
+run_mutation "fit verdict names the wrong refit point" calibrate.c \
+    "gz_fit_err_text(fit_rc), rep->refit_outlier + 1);" \
+    "gz_fit_err_text(fit_rc), rep->refit_outlier);"
+
+# The same defect the say_missing_points mutations above cover, on the path a
+# window reads instead of the terminal.
+run_mutation "missing verdict never blames proximity" calibrate.c \
+    "    if (cause == GZ_MISS_TOO_CLOSE) {
+        snprintf(out->next, sizeof out->next," \
+    "    if (0) {
+        snprintf(out->next, sizeof out->next,"
+
+run_mutation "accuracy verdict judges one degree against the wrong number" calibrate.c \
+    "    out->within_one_degree = cs->median_px <= GZ_ACC_TARGET_PX;" \
+    "    out->within_one_degree = cs->median_px <= 2 * GZ_ACC_TARGET_PX;"
+
+# The middle band splits on the predicted cost in pixels, which is what the
+# acceptance line prints. Judging the millimetres against the same 15 calls a
+# 20 mm move a lost seat and tells the human to re-fit for nothing.
+run_mutation "accuracy verdict judges the seat in millimetres" calibrate.c \
+    "    double moved_px = cs->moved_mm >= 0.0 ? cs->moved_mm * GZ_CORR_DEGRADE_PX_PER_MM : -1;" \
+    "    double moved_px = cs->moved_mm;"
+
+run_mutation "corrected stats skip the worst point" calibrate.c \
+    "        if (cors[n] > worst) worst = cors[n];" \
+    "        if (0) worst = cors[n];"
+
+
 # ---------------------------------------------------------------------------
 # record.c, the trace recorder.
 #

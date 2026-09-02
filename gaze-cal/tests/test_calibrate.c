@@ -1641,6 +1641,261 @@ static void test_correction_load_separates_absent_from_broken(void) {
     unlink(p);
 }
 
+/* ---------- sweep verdicts, the numbers the setup view draws ---------- */
+
+static void test_fit_verdict_carries_the_fit(void) {
+    struct gz_fit_report rep;
+    memset(&rep, 0, sizeof rep);
+    rep.n_in = 9; rep.n_used = 8; rep.n_rejected = 1; rep.refit_outlier = -1;
+    rep.median_resid_mm = 8.76;   /* 38 px at 0.2306 mm/px */
+    rep.worst_resid_mm = 16.37;   /* 71 px */
+    struct gz_correction corr;
+    memset(&corr, 0, sizeof corr);
+    corr.gx = 1.16947; corr.gy = 1.18752; corr.bx = -0.103394; corr.by = -0.247857;
+    corr.valid = 1;
+
+    struct gz_sweep_verdict v;
+    gz_fit_verdict_fill(GZ_FIT_OK, &rep, &corr, 0.2306, &v);
+    assert(v.kind == GZ_VERDICT_FIT);
+    assert(v.rc == 0);
+    assert(v.refused == 0);
+    assert(v.n_used == 8 && v.n_rejected == 1);
+    assert(fabs(v.median_px - 38.0) < 0.6);
+    assert(fabs(v.worst_px - 71.0) < 0.6);
+    assert(v.within_one_degree == 1);
+    assert(fabs(v.gx - 1.16947) < 1e-9 && fabs(v.by + 0.247857) < 1e-9);
+    assert(v.reason[0] == '\0');
+    assert(strstr(v.next, "verify") != NULL);
+
+    /* The one-degree judgement is the target, not the sign of the residual. */
+    rep.median_resid_mm = 8.76 * 2;
+    gz_fit_verdict_fill(GZ_FIT_OK, &rep, &corr, 0.2306, &v);
+    assert(v.within_one_degree == 0);
+}
+
+static void test_fit_verdict_names_the_refit_point(void) {
+    struct gz_fit_report rep;
+    memset(&rep, 0, sizeof rep);
+    rep.n_in = 9; rep.n_used = 8; rep.n_rejected = 1; rep.refit_outlier = 6;
+    rep.median_resid_mm = 5.0; rep.worst_resid_mm = 40.0;
+    struct gz_correction corr;
+    memset(&corr, 0, sizeof corr);
+
+    struct gz_sweep_verdict v;
+    gz_fit_verdict_fill(GZ_FIT_ERR_REFIT, &rep, &corr, 0.2306, &v);
+    assert(v.rc == 1);
+    assert(v.refused == 1);
+    assert(strstr(v.reason, "point 7") != NULL);
+    assert(strstr(v.next, "re-run") != NULL || strstr(v.next, "Re-run") != NULL);
+    assert(v.gx == 0.0);
+}
+
+static void test_fit_verdict_reason_matches_the_terminal_text(void) {
+    struct gz_fit_report rep;
+    memset(&rep, 0, sizeof rep);
+    rep.refit_outlier = -1;
+    struct gz_correction corr;
+    memset(&corr, 0, sizeof corr);
+    struct gz_sweep_verdict v;
+    gz_fit_verdict_fill(GZ_FIT_ERR_BOUNDS, &rep, &corr, 0.2306, &v);
+    assert(strstr(v.reason, gz_fit_err_text(GZ_FIT_ERR_BOUNDS)) != NULL);
+    assert(v.refused == 1 && v.rc == 1);
+
+    /* Every refusal code names itself, and none of them reads "unknown". */
+    static const int codes[] = { GZ_FIT_ERR_POINTS, GZ_FIT_ERR_FLAT,
+                                 GZ_FIT_ERR_OUTLIER, GZ_FIT_ERR_BOUNDS,
+                                 GZ_FIT_ERR_REFIT };
+    for (unsigned i = 0; i < sizeof codes / sizeof codes[0]; i++) {
+        gz_fit_verdict_fill(codes[i], &rep, &corr, 0.2306, &v);
+        assert(strcmp(v.reason, "unknown") != 0);
+        assert(strstr(v.reason, gz_fit_err_text(codes[i])) != NULL);
+        assert(v.next[0] != '\0');
+    }
+}
+
+static void test_missing_verdict_blames_proximity_when_the_top_row_is_gone(void) {
+    struct gz_sweep sw;
+    memset(&sw, 0, sizeof sw);
+    for (int i = 0; i < GZ_CAL_POINTS; i++) {
+        sw.pt[i].target[0] = GZ_CAL_PTS[i][0];
+        sw.pt[i].target[1] = GZ_CAL_PTS[i][1];
+        if (i >= 3) { sw.pt[i].n_fit = 20; sw.pt[i].eye_mm[2] = 480.0; }
+    }
+    sw.n_fit_ok = 6;
+    struct gz_sweep_verdict v;
+    gz_missing_verdict_fill(&sw, &v);
+    assert(v.kind == GZ_VERDICT_FIT);
+    assert(v.refused == 1 && v.rc == 1);
+    assert(strstr(v.reason, "6 of 9") != NULL);
+    assert(strstr(v.reason, "1, 2, 3") != NULL);
+    assert(strstr(v.next, "480 mm") != NULL);
+    assert(strstr(v.next, "600 mm") != NULL);
+}
+
+static void test_missing_verdict_blames_the_lights_otherwise(void) {
+    struct gz_sweep sw;
+    memset(&sw, 0, sizeof sw);
+    for (int i = 0; i < GZ_CAL_POINTS; i++) {
+        sw.pt[i].target[0] = GZ_CAL_PTS[i][0];
+        sw.pt[i].target[1] = GZ_CAL_PTS[i][1];
+        if (i != 0) { sw.pt[i].n_fit = 20; sw.pt[i].eye_mm[2] = 600.0; }
+    }
+    sw.n_fit_ok = 8;
+    struct gz_sweep_verdict v;
+    gz_missing_verdict_fill(&sw, &v);
+    assert(strstr(v.next, "lights") != NULL);
+    assert(strstr(v.reason, "8 of 9") != NULL);
+    assert(strstr(v.reason, "(missing 1)") != NULL);
+}
+
+/* The whole sweep gone is the case where the missing list is longest, and it
+ * is the one that would overrun a buffer sized for a couple of numbers. */
+static void test_missing_verdict_lists_every_lost_point(void) {
+    struct gz_sweep sw;
+    memset(&sw, 0, sizeof sw);
+    for (int i = 0; i < GZ_CAL_POINTS; i++) {
+        sw.pt[i].target[0] = GZ_CAL_PTS[i][0];
+        sw.pt[i].target[1] = GZ_CAL_PTS[i][1];
+    }
+    sw.n_fit_ok = 0;
+    struct gz_sweep_verdict v;
+    gz_missing_verdict_fill(&sw, &v);
+    assert(strstr(v.reason, "0 of 9") != NULL);
+    assert(strstr(v.reason, "1, 2, 3, 4, 5, 6, 7, 8, 9") != NULL);
+    /* No eye position anywhere, so proximity cannot be the diagnosis. */
+    assert(strstr(v.next, "lights") != NULL);
+}
+
+static void test_corrected_stats_match_the_hand_computed_case(void) {
+    /* One point, so the median is the point. Target (0.5, 0.5), raw gaze
+     * reported = g*true + b, so the correction lands exactly on target and
+     * the corrected error is 0 while the raw error is not. */
+    struct gz_correction corr;
+    memset(&corr, 0, sizeof corr);
+    corr.gx = 1.2; corr.gy = 1.1; corr.bx = 0.01; corr.by = -0.02;
+    corr.area.w_mm = 590.42; corr.area.h_mm = 333.72;
+    corr.area.ox_mm = -295.21; corr.area.oy_mm = 5.0;
+    corr.form = GZ_CORR_FORM_STATIC; corr.valid = 1;
+    corr.eye_proj[0] = 0.5; corr.eye_proj[1] = 0.98;
+
+    struct gz_screen scr = { "DP-2", 4000, 1440, 2560, 1440 };
+    struct gz_sweep sw;
+    memset(&sw, 0, sizeof sw);
+    sw.pt[4].target[0] = 0.5; sw.pt[4].target[1] = 0.5;
+    sw.pt[4].gaze_mean[0] = 1.2 * 0.5 + 0.01;
+    sw.pt[4].gaze_mean[1] = 1.1 * 0.5 - 0.02;
+    sw.pt[4].n_fit = 20;
+    /* Eye straight in front of the panel centre, 600 mm out, so eye_proj
+     * comes back near (0.5, 0.98) and moved_mm is small. */
+    sw.pt[4].eye_mm[0] = 0.0; sw.pt[4].eye_mm[1] = 0.0; sw.pt[4].eye_mm[2] = 600.0;
+
+    struct gz_corr_stats cs;
+    unsigned n = gz_corrected_stats(&sw, &scr, &corr, &cs);
+    assert(n == 1 && cs.n == 1);
+    assert(cs.median_px < 0.5 && cs.worst_px < 0.5);
+    double raw_px = hypot((sw.pt[4].gaze_mean[0] - 0.5) * 2560,
+                          (sw.pt[4].gaze_mean[1] - 0.5) * 1440);
+    assert(fabs(cs.raw_median_px - raw_px) < 1e-6);
+    assert(cs.moved_mm >= 0.0);
+
+    /* A fit that recorded no seat cannot say how far the head has moved. */
+    corr.eye_proj[0] = 0.0; corr.eye_proj[1] = 0.0;
+    assert(gz_corrected_stats(&sw, &scr, &corr, &cs) == 1);
+    assert(cs.moved_mm < 0.0);
+}
+
+/* The worst is the maximum, not the last point, and the median is the middle
+ * of the corrected column rather than of the raw one. */
+static void test_corrected_stats_take_the_worst_and_the_median(void) {
+    struct gz_correction corr;
+    memset(&corr, 0, sizeof corr);
+    corr.gx = 1.0; corr.gy = 1.0; corr.form = GZ_CORR_FORM_STATIC; corr.valid = 1;
+    corr.area.w_mm = 590.42; corr.area.h_mm = 333.72;
+    corr.area.ox_mm = -295.21; corr.area.oy_mm = 5.0;
+
+    struct gz_screen scr = { "DP-2", 0, 0, 1000, 1000 };
+    struct gz_sweep sw;
+    memset(&sw, 0, sizeof sw);
+    /* Identity correction, so the corrected error is the offset in pixels:
+     * 300, 100, 200 px, worst in the middle of the sweep. */
+    const double off[3] = { 0.3, 0.1, 0.2 };
+    for (int i = 0; i < 3; i++) {
+        sw.pt[i].target[0] = 0.5; sw.pt[i].target[1] = 0.5;
+        sw.pt[i].gaze_mean[0] = 0.5 + off[i];
+        sw.pt[i].gaze_mean[1] = 0.5;
+        sw.pt[i].n_fit = 20;
+        sw.pt[i].eye_mm[2] = 600.0;
+    }
+    struct gz_corr_stats cs;
+    assert(gz_corrected_stats(&sw, &scr, &corr, &cs) == 3);
+    assert(fabs(cs.median_px - 200.0) < 1e-6);
+    assert(fabs(cs.worst_px - 300.0) < 1e-6);
+    assert(fabs(cs.raw_median_px - 200.0) < 1e-6);
+}
+
+static void test_corrected_stats_with_no_pairs_is_zero(void) {
+    struct gz_correction corr;
+    memset(&corr, 0, sizeof corr);
+    corr.gx = 1.0; corr.gy = 1.0; corr.valid = 1;
+    struct gz_screen scr = { "DP-2", 0, 0, 2560, 1440 };
+    struct gz_sweep sw;
+    memset(&sw, 0, sizeof sw);
+    struct gz_corr_stats cs;
+    assert(gz_corrected_stats(&sw, &scr, &corr, &cs) == 0);
+    assert(cs.n == 0 && cs.median_px == 0.0);
+}
+
+static void test_accuracy_verdict_bands(void) {
+    struct gz_corr_stats cs = { 9, 40.0, 100.0, 260.0, 7.0 };
+    struct gz_sweep_verdict v;
+    gz_accuracy_verdict_fill(1, &cs, 260.0, 380.0, &v);
+    assert(v.kind == GZ_VERDICT_ACCURACY);
+    assert(v.corrected == 1 && v.refused == 0 && v.rc == 0);
+    assert(fabs(v.median_px - 40.0) < 1e-9 && fabs(v.worst_px - 100.0) < 1e-9);
+    assert(v.within_one_degree == 1);
+    assert(fabs(v.moved_mm - 7.0) < 1e-9);
+    assert(v.n_used == 9);
+    assert(strstr(v.next, "as predicted") != NULL);
+
+    cs.median_px = 65.0; cs.moved_mm = 40.0;
+    gz_accuracy_verdict_fill(1, &cs, 260.0, 380.0, &v);
+    assert(v.within_one_degree == 0);
+    assert(strstr(v.next, "re-fit") != NULL || strstr(v.next, "Re-fit") != NULL);
+
+    /* The middle band splits on the cost in pixels, 0.63 px per mm, which is
+     * what report_corrected prints. 20 mm is 13 px and does not explain a
+     * degraded run, and judging the millimetres against 15 would call it. */
+    cs.moved_mm = 20.0;
+    gz_accuracy_verdict_fill(1, &cs, 260.0, 380.0, &v);
+    assert(strstr(v.next, "does not explain") != NULL);
+    assert(strstr(v.next, "re-fit") == NULL && strstr(v.next, "Re-fit") == NULL);
+
+    cs.median_px = 90.0;
+    gz_accuracy_verdict_fill(1, &cs, 260.0, 380.0, &v);
+    assert(strstr(v.next, "FALSIFIED") != NULL);
+
+    cs.median_px = 20.0;
+    gz_accuracy_verdict_fill(1, &cs, 260.0, 380.0, &v);
+    assert(v.within_one_degree == 1);
+    assert(strstr(v.next, "better than predicted") != NULL);
+
+    /* No correction on disk: the raw numbers are the verdict, and next says fit. */
+    gz_accuracy_verdict_fill(0, NULL, 260.0, 380.0, &v);
+    assert(v.corrected == 0);
+    assert(fabs(v.median_px - 260.0) < 1e-9);
+    assert(v.within_one_degree == 0);
+    assert(strstr(v.next, "fit") != NULL);
+
+    /* A correction that produced no usable pair is the same case, and it must
+     * not read the empty stats. */
+    struct gz_corr_stats empty;
+    memset(&empty, 0, sizeof empty);
+    gz_accuracy_verdict_fill(1, &empty, 30.0, 44.0, &v);
+    assert(v.corrected == 0);
+    assert(fabs(v.median_px - 30.0) < 1e-9);
+    assert(v.within_one_degree == 1);
+}
+
 int main(void) {
     test_points_land_on_the_right_pixels();
     test_points_are_clamped_and_nan_safe();
@@ -1688,6 +1943,17 @@ int main(void) {
     test_correction_file_round_trips();
     test_correction_load_gates_on_the_display_area();
     test_correction_load_separates_absent_from_broken();
+
+    test_fit_verdict_carries_the_fit();
+    test_fit_verdict_names_the_refit_point();
+    test_fit_verdict_reason_matches_the_terminal_text();
+    test_missing_verdict_blames_proximity_when_the_top_row_is_gone();
+    test_missing_verdict_blames_the_lights_otherwise();
+    test_missing_verdict_lists_every_lost_point();
+    test_corrected_stats_match_the_hand_computed_case();
+    test_corrected_stats_take_the_worst_and_the_median();
+    test_corrected_stats_with_no_pairs_is_zero();
+    test_accuracy_verdict_bands();
 
     printf("test_calibrate: all passed\n");
     return 0;
