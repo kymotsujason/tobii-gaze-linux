@@ -35,7 +35,10 @@ extern "C" {
 int gz_screen_find(const char *name, struct gz_screen *out);
 
 /* One window per process, so this hands back file-static state rather than
- * allocating. */
+ * allocating. Opening again in the SAME mode returns the open window, and
+ * opening in the other mode returns NULL after printing why, since a plain
+ * handle cannot draw or take keys and a second owner of the input window would
+ * ungrab the keyboard out from under it. Close the one you have first. */
 struct gz_stimulus;
 
 struct gz_stimulus *gz_stimulus_open(const char *output);
@@ -57,7 +60,8 @@ void gz_stimulus_close(struct gz_stimulus *s);
  * The window is override_redirect, so KWin never focuses it: without the grab
  * it receives no key press at all. gz_stimulus_close releases the grab, and so
  * must every exit path, because a held grab locks the keyboard for the whole
- * session. Returns NULL after printing why. */
+ * session. Returns NULL after printing why, including when a plain window is
+ * already open. */
 struct gz_stimulus *gz_stimulus_open_input(const char *output);
 
 /* The next key press, or GZ_KEY_NONE. Never blocks. */

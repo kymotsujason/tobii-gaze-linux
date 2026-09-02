@@ -107,6 +107,7 @@ struct gz_stimulus {
     unsigned long black, white;
     struct gz_screen screen;
     int open;
+    int input_mode;              /* 1 when opened by gz_stimulus_open_input */
 
     /* Input mode only, all zero for a plain gz_stimulus_open. */
     Pixmap back;
@@ -221,7 +222,24 @@ static int grab_keyboard(void) {
 }
 
 static struct gz_stimulus *open_common(const char *output, int input) {
-    if (g_stim.open) return &g_stim;
+    if (g_stim.open) {
+        /* The same mode twice is the one handle, which is what a second
+         * gz_stimulus_open has always got. A mismatch is refused rather than
+         * served or upgraded. Handing a plain window back to open_input gives
+         * a handle with no back buffer, no font and no KeyPressMask, so every
+         * primitive no-ops and no key ever arrives, and handing the input
+         * window back to a plain open gives a second owner whose matching
+         * gz_stimulus_close ungrabs the keyboard and destroys the window under
+         * the live view. Upgrading in place would only cover the first
+         * direction and would still leave two owners of one close, so both
+         * directions fail loudly the way find_output does. */
+        if (g_stim.input_mode == input) return &g_stim;
+        fprintf(stderr, "stimulus: a %s window is already open on %s, "
+                        "cannot also open a %s one. REFUSING.\n",
+                g_stim.input_mode ? "setup" : "plain", g_stim.screen.name,
+                input ? "setup" : "plain");
+        return NULL;
+    }
 
     memset(&g_stim, 0, sizeof g_stim);
 
@@ -277,6 +295,7 @@ static struct gz_stimulus *open_common(const char *output, int input) {
     }
 
     g_stim.open = 1;
+    g_stim.input_mode = input;
     return &g_stim;
 }
 
@@ -326,7 +345,7 @@ int gz_stimulus_show(struct gz_stimulus *s, double nx, double ny) {
 }
 
 void gz_stimulus_close(struct gz_stimulus *s) {
-    if (!s->open) return;
+    if (s == NULL || !s->open) return;
     /* The ungrab comes first and is unconditional past the flag, because a
      * grab that outlives the process is a locked keyboard for the whole
      * session. XCloseDisplay would release it too, but only if we reach it. */
@@ -344,6 +363,7 @@ void gz_stimulus_close(struct gz_stimulus *s) {
     XCloseDisplay(s->dpy);
     s->dpy = NULL;
     s->open = 0;
+    s->input_mode = 0;
 }
 
 /* XAllocColor is a round trip and every frame asks for the same handful of
@@ -361,10 +381,12 @@ static unsigned long pixel_for(struct gz_stimulus *s, unsigned long rgb) {
     c.blue  = (unsigned short)((rgb & 0xFFu) * 257u);
     c.flags = DoRed | DoGreen | DoBlue;
     unsigned long px = s->white;
-    if (XAllocColor(s->dpy, DefaultColormap(s->dpy, DefaultScreen(s->dpy)), &c))
-        px = c.pixel;
+    int ok = XAllocColor(s->dpy, DefaultColormap(s->dpy, DefaultScreen(s->dpy)), &c);
+    if (ok) px = c.pixel;
 
-    if (s->cache_n < GZ_STIM_COLOR_CACHE) {
+    /* Cache only a real allocation, so one transient failure does not pin this
+     * rgb to white for the life of the window. */
+    if (ok && s->cache_n < GZ_STIM_COLOR_CACHE) {
         s->cache_rgb[s->cache_n] = rgb;
         s->cache_px[s->cache_n] = px;
         s->cache_n++;
@@ -412,7 +434,7 @@ void gz_stimulus_ring(struct gz_stimulus *s, int cx, int cy, int r, int width,
      * extent from 90 degrees. */
     XDrawArc(s->dpy, s->back, s->gc, cx - r, cy - r,
              (unsigned)(2 * r), (unsigned)(2 * r), 90 * 64, -degrees * 64);
-    XSetLineAttributes(s->dpy, s->gc, 1, LineSolid, CapButt, JoinMiter);
+    XSetLineAttributes(s->dpy, s->gc, 0, LineSolid, CapButt, JoinMiter);
 }
 
 /* Blows the one available core font up by an integer factor. The glyphs go to
@@ -475,6 +497,9 @@ int gz_stimulus_text(struct gz_stimulus *s, int x, int y, const char *text,
         XDrawString(s->dpy, s->back, s->gc, x, y, text, n);
         return w;
     }
+    /* draw_text_scaled clamps to the scratch width, so report the clamped
+     * width rather than one the caller cannot have seen. */
+    if (w > s->scratch_w) w = s->scratch_w;
     draw_text_scaled(s, x, y, text, n, w);
     return w * s->text_scale;
 }
