@@ -23,6 +23,7 @@
 #include "display.h"
 #include "record.h"
 #include "stimulus.h"
+#include "view.h"
 
 static volatile sig_atomic_t stop_requested = 0;
 
@@ -226,11 +227,17 @@ static void usage(void) {
             "                             capture a gameplay trace to a CSV, raw and\n"
             "                             corrected. Default 300 s. Refuses without a\n"
             "                             host-side fit unless --raw\n"
+            "  setup [--output NAME] [--config PATH]\n"
+            "                             fullscreen view of the device's track box,\n"
+            "                             both eyes, distance and gaze, with the fit\n"
+            "                             and verify sweeps run from the screen\n"
             "\n"
             "--output names an X RandR output; the default is the X primary.\n"
-            "display, probe, calibrate, accuracy and record exit 0 when they agree, 1\n"
-            "when the device disagrees (fix with tobiifreed --force-display-area), 3 when\n"
-            "the geometry could not be read at all, and 2 on a usage or config error.\n");
+            "display, probe, calibrate, accuracy, record and setup exit 0 when they agree,\n"
+            "1 when the device disagrees (fix with tobiifreed --force-display-area), 3\n"
+            "when the geometry could not be read at all, and 2 on a usage or config\n"
+            "error. setup exits 1 when the daemon never answered, since a mismatch\n"
+            "opens the view rather than refusing.\n");
 }
 
 /* --output/--config/--label, shared by the three stimulus commands. Returns 0,
@@ -375,6 +382,16 @@ int main(int argc, char **argv) {
             return 2;
         }
         return gz_cmd_record(&o);
+    }
+    if (strcmp(argv[i], "setup") == 0) {
+        struct gz_setup_opts o;
+        memset(&o, 0, sizeof o);
+        o.sock = path;
+        if (parse_common(argc, argv, i + 1, &o.output, &o.cfg, NULL) != 0) {
+            usage();
+            return 2;
+        }
+        return gz_cmd_setup(&o);
     }
 
     usage();

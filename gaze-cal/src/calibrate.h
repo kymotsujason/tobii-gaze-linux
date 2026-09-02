@@ -392,6 +392,11 @@ int gz_connect_and_gate(struct gz_client *c, const char *sock, const char *cfg,
 
 int gz_correction_path(char *buf, size_t cap);
 
+/* The gaze-cal.log the sweeps append to, in the same data directory. The
+ * setup view writes its own lines there, so the two are one record of a
+ * session rather than two files nobody can interleave. Returns 0, or -1. */
+int gz_log_path(char *buf, size_t cap);
+
 /* Writes through a temporary file and renames, like the blob. `rep` may be
  * NULL; when present its numbers are appended as extra fit_* keys, which
  * gz_correction_parse does not model and therefore ignores. `mm_per_px` turns

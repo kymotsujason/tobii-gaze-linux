@@ -56,18 +56,34 @@ static void test_eye_px_maps_the_box_edges_and_centre(void) {
     struct gz_view_layout l;
     gz_view_layout(&DP2, &l);
     int px, py;
+    /* Box x is mirrored and box y is not, so 0 lands on the RIGHT edge and the
+     * top, and 1 on the left edge and the bottom. */
     gz_view_eye_px(&l, 0.0, 0.0, &px, &py);
-    assert(px == l.box_x && py == l.box_y);
+    assert(px == l.box_x + l.box_w && py == l.box_y);
     gz_view_eye_px(&l, 1.0, 1.0, &px, &py);
-    assert(px == l.box_x + l.box_w && py == l.box_y + l.box_h);
+    assert(px == l.box_x && py == l.box_y + l.box_h);
     gz_view_eye_px(&l, 0.5, 0.5, &px, &py);
     assert(px == l.box_x + l.box_w / 2 && py == l.box_y + l.box_h / 2);
     gz_view_eye_px(&l, 1.3, -0.2, &px, &py);            /* clamped */
-    assert(px == l.box_x + l.box_w && py == l.box_y);
-    gz_view_eye_px(&l, -0.4, 1.9, &px, &py);            /* the other way */
-    assert(px == l.box_x && py == l.box_y + l.box_h);
-    gz_view_eye_px(&l, nan(""), nan(""), &px, &py);     /* a lost eye */
     assert(px == l.box_x && py == l.box_y);
+    gz_view_eye_px(&l, -0.4, 1.9, &px, &py);            /* the other way */
+    assert(px == l.box_x + l.box_w && py == l.box_y + l.box_h);
+    gz_view_eye_px(&l, nan(""), nan(""), &px, &py);     /* a lost eye */
+    assert(px == l.box_x + l.box_w && py == l.box_y);
+}
+
+/* The measurement the mirror comes from, on 2026-09-01: the RIGHT eye sat at
+ * tracker x +46 mm and read box x 0.39, while the LEFT eye at -17 mm read 0.54.
+ * The device counts box x towards the user's left, so the right eye has to draw
+ * to the right of the left one or the dots follow the head backwards. */
+static void test_eye_px_mirrors_the_box_x_axis(void) {
+    struct gz_view_layout l;
+    gz_view_layout(&DP2, &l);
+    int rx, ry, lx, ly;
+    gz_view_eye_px(&l, 0.39, 0.463, &rx, &ry);
+    gz_view_eye_px(&l, 0.54, 0.462, &lx, &ly);
+    assert(rx > lx);
+    assert(ry < l.box_y + l.box_h / 2 + 4 && ry > l.box_y + l.box_h / 2 - 20);
 }
 
 static void test_bar_maps_near_to_the_bottom(void) {
@@ -433,6 +449,7 @@ int main(void) {
     test_layout_is_a_third_tall_and_four_by_three();
     test_layout_scales_with_the_screen();
     test_eye_px_maps_the_box_edges_and_centre();
+    test_eye_px_mirrors_the_box_x_axis();
     test_bar_maps_near_to_the_bottom();
     test_zfit_seed_puts_the_floor_near_a_quarter();
     test_zfit_follows_new_pairs();

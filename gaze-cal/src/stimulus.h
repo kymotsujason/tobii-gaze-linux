@@ -85,6 +85,11 @@ void gz_stimulus_ring(struct gz_stimulus *s, int cx, int cy, int r, int width,
 int  gz_stimulus_text(struct gz_stimulus *s, int x, int y, const char *text,
                       unsigned long rgb);
 int  gz_stimulus_text_height(const struct gz_stimulus *s);
+/* What gz_stimulus_text would return, without drawing anything. Font metrics
+ * are client side, so this costs no round trip, where measuring by drawing off
+ * screen costs an XGetImage per call and the setup view centres text on every
+ * frame. */
+int  gz_stimulus_text_width(const struct gz_stimulus *s, const char *text);
 void gz_stimulus_present(struct gz_stimulus *s);
 
 #ifdef __cplusplus

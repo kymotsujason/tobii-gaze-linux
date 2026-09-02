@@ -1096,6 +1096,12 @@ run_mutation "the box is not a third of the screen" view.c \
 run_mutation "eye dots not clamped to the box" view.c \
     "    if (box_x > 1.0) box_x = 1.0;" "    if (0) box_x = 1.0;"
 
+# The dots followed the head backwards until 2026-09-01: the device counts box
+# x towards the user's left, like a camera image.
+run_mutation "eye dots not mirrored" view.c \
+    "    *px = l->box_x + l->box_w - (int)lround(box_x * l->box_w);" \
+    "    *px = l->box_x + (int)lround(box_x * l->box_w);"
+
 run_mutation "bar drawn upside down" view.c \
     "    return l->bar_y + l->bar_h - (int)lround(box_z * l->bar_h);" \
     "    return l->bar_y + (int)lround(box_z * l->bar_h);"

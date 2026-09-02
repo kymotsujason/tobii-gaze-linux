@@ -31,7 +31,14 @@ void gz_view_layout(const struct gz_screen *scr, struct gz_view_layout *out) {
     out->eye_r = scr->h / 120;                    /* 12 px on 1440 */
 }
 
-/* The two comparisons are written negated so a nan lands at 0 rather than
+/* Box x is drawn MIRRORED. The device counts it like a camera image seen from
+ * the tracker, so it grows towards the user's left: measured 2026-09-01, the
+ * right eye at tracker x +46 mm read box x 0.39 while the left eye at -17 mm
+ * read 0.54. Drawn straight, the dots move the way the user did not. Box y
+ * needs no flip, since in that same sample an eye rising from 13 to 24 mm took
+ * box y from 0.47 to 0.446, which already draws upward.
+ *
+ * The two comparisons are written negated so a nan lands at 0 rather than
  * falling through both and reaching lround with a value it cannot represent.
  * A lost eye is exactly where that arrives. */
 void gz_view_eye_px(const struct gz_view_layout *l, double box_x, double box_y,
@@ -40,7 +47,7 @@ void gz_view_eye_px(const struct gz_view_layout *l, double box_x, double box_y,
     if (!(box_y >= 0.0)) box_y = 0.0;
     if (box_x > 1.0) box_x = 1.0;
     if (box_y > 1.0) box_y = 1.0;
-    *px = l->box_x + (int)lround(box_x * l->box_w);
+    *px = l->box_x + l->box_w - (int)lround(box_x * l->box_w);
     *py = l->box_y + (int)lround(box_y * l->box_h);
 }
 

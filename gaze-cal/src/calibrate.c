@@ -55,10 +55,20 @@ static int data_dir(char *buf, size_t cap) {
     return 0;
 }
 
+/* Beside data_dir rather than beside gz_correction_path, so log_open below is
+ * built on it. The setup view appends to the same file, and two expressions
+ * for one path is how they would come to differ. */
+int gz_log_path(char *buf, size_t cap) {
+    char dir[512];
+    if (data_dir(dir, sizeof dir) != 0) return -1;
+    int n = snprintf(buf, cap, "%s/gaze-cal.log", dir);
+    if (n < 0 || (size_t)n >= cap) return -1;
+    return 0;
+}
+
 static void log_open(const char *what, const char *label) {
-    char dir[512], path[600];
-    if (data_dir(dir, sizeof dir) != 0) return;
-    if (snprintf(path, sizeof path, "%s/gaze-cal.log", dir) >= (int)sizeof path) return;
+    char path[600];
+    if (gz_log_path(path, sizeof path) != 0) return;
     g_log = fopen(path, "a");
     if (g_log == NULL) return;
 

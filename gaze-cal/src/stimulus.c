@@ -504,6 +504,19 @@ int gz_stimulus_text(struct gz_stimulus *s, int x, int y, const char *text,
     return w * s->text_scale;
 }
 
+/* Same clamp as gz_stimulus_text, so a caller centring a long line uses the
+ * width that will actually be drawn. XTextWidth reads the XFontStruct this
+ * process already holds and never talks to the server. */
+int gz_stimulus_text_width(const struct gz_stimulus *s, const char *text) {
+    if (s == NULL || !s->open || s->font == NULL || text == NULL) return 0;
+    int n = (int)strlen(text);
+    if (n <= 0) return 0;
+    int w = XTextWidth(s->font, text, n);
+    if (s->text_scale <= 1) return w;
+    if (w > s->scratch_w) w = s->scratch_w;
+    return w * s->text_scale;
+}
+
 int gz_stimulus_text_height(const struct gz_stimulus *s) {
     if (s == NULL || s->font == NULL) return 0;
     return (s->font->ascent + s->font->descent) * s->text_scale;

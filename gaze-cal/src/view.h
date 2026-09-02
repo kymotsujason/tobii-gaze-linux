@@ -100,7 +100,12 @@ size_t gz_view_readout_text(double z_mm, int l_valid, int r_valid, double hz,
 /* Sweep sequencing, with I/O behind callbacks so the order is testable: close
  * the client, run the sweep, reload the correction after a successful fit,
  * reconnect, then feed the result to the state machine. Returns the action
- * the state machine wants next, normally GZ_ACT_NONE. */
+ * the state machine wants next, normally GZ_ACT_NONE.
+ *
+ * run_fit and run_verify must set `out->rc` on EVERY path, including their own
+ * early returns, because the sequencing reads the verdict rather than the
+ * callback's return value. The cores do: each of their five nonzero returns
+ * fills the verdict first. */
 struct gz_view_io {
     void *ctx;
     void (*close_client)(void *ctx);
@@ -115,6 +120,24 @@ enum gz_view_action gz_view_run_action(struct gz_view *v, enum gz_view_action ac
 /* Reads the fit_utc line out of a correction file into `buf`, "" when the
  * file or the key is absent. Returns 1 when found. */
 int gz_view_fit_stamp(const char *path, char *buf, size_t cap);
+
+/* ---------------- the command ----------------
+ *
+ * Declared here and implemented in setup.c, which is the only file in this
+ * pair that includes stimulus.h and client.h. tests/test_view.c links view.c
+ * with no X anywhere, so the frame loop cannot live beside the pure half. */
+struct gz_setup_opts {
+    const char *sock;       /* daemon socket path */
+    const char *cfg;        /* tobii.json or NULL */
+    const char *output;     /* RandR output name or NULL for the primary */
+};
+
+/* Opens the view and runs it until Escape. Exit codes follow the other
+ * commands: 0 closed by the user, 1 the daemon never answered, 3 the geometry
+ * could not be read, 2 the config could not be read. A display area MISMATCH
+ * opens the view anyway, with a banner, because the box needs no geometry and
+ * the sweeps refuse on their own. */
+int gz_cmd_setup(const struct gz_setup_opts *o);
 
 #ifdef __cplusplus
 }

@@ -20,6 +20,12 @@
 # Sweep 3 must be a SIDEWAYS or UP-AND-DOWN move, not nearer or further: the
 # correction has no depth term, so moving in depth measures nothing.
 #
+# `gaze-cal setup` does the same from a fullscreen screen that shows the
+# tracker's view of both eyes and the distance first, and is the better way for
+# a first fit, since you can see that the tracker has you before you spend a
+# sweep finding out that it doesn't. This script remains for a terminal-only
+# session.
+#
 # THE CORRECTION IS PER SEATING POSITION. Fit it where you actually play, and
 # re-fit if you move your chair for good. Depth does not matter; sideways and
 # height do.

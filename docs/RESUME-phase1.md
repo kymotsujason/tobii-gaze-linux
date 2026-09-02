@@ -116,10 +116,14 @@ stays. `tools/score_correction.py` mirrors it.
    form H parameters whose offsets are eye-relative, so form S REFUSES it: reading it as
    form S would be wrong by about 90 px and would look like a working calibration. The
    refusal was measured against the real file in the session 4 review. Run
-   `./scripts/fit-correction.sh` where you actually sit, lights on, about 600 mm back. It
-   runs the fit sweep and then the verify sweep without moving, expecting 35 to 50 px and
-   WITHIN ONE DEGREE, and the third sweep is optional. Re-fit whenever the seat changes
-   for good.
+   `gaze-cal setup` where you actually sit, lights on, about 600 mm back. It opens a
+   fullscreen view on DP-2 that shows the tracker's own picture of both eyes, your
+   distance against the 520 mm floor, and where it thinks you're looking, so you can see
+   that it has you before spending a sweep. Look at the "fit" target for 1.5 seconds, or
+   press Enter, and it runs the fit sweep, then offers "verify" the same way. Don't move
+   between the two, and expect 35 to 50 px and WITHIN ONE DEGREE. Escape closes it.
+   `./scripts/fit-correction.sh` is the terminal-only alternative and adds the optional
+   third sweep. Re-fit whenever the seat changes for good.
 2. **Task 15's recording**, five minutes of real osu, unblocked once form S is verified.
    `gaze-cal record traces/osu-YYYYMMDD.csv` records 300 seconds by default, refuses to
    run without a usable form S fit (pass `--raw` only for a smoke test, never for Task 16),
