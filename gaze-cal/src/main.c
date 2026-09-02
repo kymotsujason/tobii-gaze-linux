@@ -21,6 +21,7 @@
 #include "calibrate.h"
 #include "client.h"
 #include "display.h"
+#include "record.h"
 #include "stimulus.h"
 
 static volatile sig_atomic_t stop_requested = 0;
@@ -221,6 +222,10 @@ static void usage(void) {
             "                             measure gaze error at the nine points, and\n"
             "                             report it corrected when a fit is on disk\n"
             "  preview [--sample N]       print N normalised gaze samples on stdout\n"
+            "  record [--seconds N] [--raw] [--config PATH] PATH\n"
+            "                             capture a gameplay trace to a CSV, raw and\n"
+            "                             corrected. Default 300 s. Refuses without a\n"
+            "                             host-side fit unless --raw\n"
             "\n"
             "--output names an X RandR output; the default is the X primary.\n"
             "display, probe, calibrate and accuracy exit 0 when they agree, 1 when the\n"
@@ -336,6 +341,37 @@ int main(int argc, char **argv) {
             }
         }
         return gz_cmd_preview(path, n);
+    }
+    if (strcmp(argv[i], "record") == 0) {
+        struct gz_record_opts o;
+        memset(&o, 0, sizeof o);
+        o.sock = path;
+        o.seconds = 300;
+        for (int a = i + 1; a < argc; a++) {
+            if (strcmp(argv[a], "--seconds") == 0 && a + 1 < argc) {
+                char *end = NULL;
+                long v = strtol(argv[++a], &end, 10);
+                if (end == argv[a] || *end != '\0' || v <= 0 || v > 86400) {
+                    fprintf(stderr, "--seconds wants 1..86400\n");
+                    return 2;
+                }
+                o.seconds = (unsigned)v;
+            } else if (strcmp(argv[a], "--raw") == 0) {
+                o.raw = 1;
+            } else if (strcmp(argv[a], "--config") == 0 && a + 1 < argc) {
+                o.cfg = argv[++a];
+            } else if (argv[a][0] != '-' && o.path == NULL) {
+                o.path = argv[a];
+            } else {
+                usage();
+                return 2;
+            }
+        }
+        if (o.path == NULL) {
+            fprintf(stderr, "record wants a path to write\n");
+            return 2;
+        }
+        return gz_cmd_record(&o);
     }
 
     usage();

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Mutation harness for the gaze-cal test suites.
 #
-# Breaks proto.c, client.c or display.c one way at a time and requires the
-# matching suite to fail.
+# Breaks proto.c, client.c, display.c, calibrate.c or record.c one way at a
+# time and requires the matching suite to fail.
 # A mutation that survives means the test covering it is decorative, which is
 # the failure mode this project has been bitten by: three plan-mandated code
 # blocks were wrong and were caught by testing rather than by reading.
@@ -34,9 +34,10 @@ fresh_copy() {
     rm -rf "$WORK/m"; mkdir -p "$WORK/m/src" "$WORK/m/tests"
     cp "$SRC/src/proto.c" "$SRC/src/proto.h" "$SRC/src/client.c" "$SRC/src/client.h" \
        "$SRC/src/display.c" "$SRC/src/display.h" "$SRC/src/calibrate.c" "$SRC/src/calibrate.h" \
+       "$SRC/src/record.c" "$SRC/src/record.h" \
        "$WORK/m/src/"
     cp "$SRC/tests/test_proto.c" "$SRC/tests/test_client.c" "$SRC/tests/test_display.c" \
-       "$SRC/tests/test_calibrate.c" "$WORK/m/tests/"
+       "$SRC/tests/test_calibrate.c" "$SRC/tests/test_record.c" "$WORK/m/tests/"
 }
 
 apply_edit() {
@@ -939,6 +940,67 @@ run_mutation "residual provenance written in millimetres" calibrate.c \
     "                            \"fit_median_resid_px=%.1f\\nfit_worst_resid_px=%.1f\\n\"," \
     "                            \"fit_median_resid_mm=%.1f\\nfit_worst_resid_mm=%.1f\\n\","
 
+
+# ---------------------------------------------------------------------------
+# record.c, the trace recorder.
+#
+# Only the pure half is mutated. gz_cmd_record drives a socket, a file and a
+# signal handler, and tests/test_record.c has no harness for any of the three,
+# so a mutation there would survive and be counted as an unexpected survivor
+# rather than telling anyone anything. What IS mutated is the half that decides
+# what a row says, which is where a defect would be invisible: a trace with a
+# wrong corr_* column looks exactly like a good one until Task 16 fits the
+# overlay filter to the wrong signal.
+TEST_MAIN="tests/test_record.c"
+TEST_SRCS="src/record.c src/calibrate.c src/display.c src/client.c src/proto.c"
+
+run_mutation "validity inverted for the left eye" record.c \
+    "        if (gz_eye_valid(s->validity_L)) {" \
+    "        if (!gz_eye_valid(s->validity_L)) {"
+
+run_mutation "validity inverted for the right eye" record.c \
+    "        if (gz_eye_valid(s->validity_R)) {" \
+    "        if (!gz_eye_valid(s->validity_R)) {"
+
+run_mutation "the left corrected point taken from the combined field" record.c \
+    "            gz_correct_point(corr, s->gaze_point_2d_L_norm, cl);" \
+    "            gz_correct_point(corr, s->gaze_point_2d_norm, cl);"
+
+run_mutation "the right corrected point taken from the left eye" record.c \
+    "            gz_correct_point(corr, s->gaze_point_2d_R_norm, cr);" \
+    "            gz_correct_point(corr, s->gaze_point_2d_L_norm, cr);"
+
+run_mutation "an eyeless frame's combined point corrected anyway" record.c \
+    "        hc = gz_gaze_correct(corr, s, cc);" \
+    "        hc = 1;"
+
+run_mutation "a correction that was never loaded applied anyway" record.c \
+    "    int usable = (corr != NULL && corr->valid);" \
+    "    int usable = (corr != NULL);"
+
+run_mutation "the caller's buffer bound dropped" record.c \
+    "    if ((size_t)n >= cap) return 0;" \
+    "    if (0) return 0;"
+
+run_mutation "an oversize row truncated instead of refused" record.c \
+    "    if (n < 0 || (size_t)n >= sizeof row) return 0;" \
+    "    if (n < 0) return 0;"
+
+run_mutation "the device stamp printed unsigned" record.c \
+    "                     \"%llu,%lld,%u,%u,%u,%u,\"" \
+    "                     \"%llu,%llu,%u,%u,%u,%u,\""
+
+run_mutation "the corrected columns dropped from the header" record.h \
+    "    \"corr_lx,corr_ly,corr_rx,corr_ry,corr_cx,corr_cy\\n\"" \
+    "    \"\\n\""
+
+run_mutation "a missing correction recorded anyway" record.c \
+    "    if (load_rc == 1) return GZ_REC_CORRECTED;" \
+    "    return GZ_REC_CORRECTED;"
+
+run_mutation "--raw ignored" record.c \
+    "    if (raw) return GZ_REC_RAW;" \
+    "    if (0) return GZ_REC_RAW;"
 
 echo
 echo "killed=$killed  documented_survivors=$documented  unexpected_survivors=$unexpected"

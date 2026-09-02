@@ -30,6 +30,7 @@ test: | $(BUILD)
 	$(CC) $(CFLAGS) -o $(BUILD)/test_client tests/test_client.c src/client.c src/proto.c $(LDLIBS) && $(BUILD)/test_client
 	$(CC) $(CFLAGS) -o $(BUILD)/test_display tests/test_display.c src/display.c src/client.c src/proto.c $(LDLIBS) && $(BUILD)/test_display
 	$(CC) $(CFLAGS) -o $(BUILD)/test_calibrate tests/test_calibrate.c src/calibrate.c src/display.c src/client.c src/proto.c $(LDLIBS) && $(BUILD)/test_calibrate
+	$(CC) $(CFLAGS) -o $(BUILD)/test_record tests/test_record.c src/record.c src/calibrate.c src/display.c src/client.c src/proto.c $(LDLIBS) && $(BUILD)/test_record
 
 # Proves the parser never reads past the caller's buffer and never relies on
 # undefined behaviour. The exact-fit heap tests are meaningless without it.
@@ -46,6 +47,9 @@ test-asan: | $(BUILD)
 	$(CC) $(CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
 	    -o $(BUILD)/test_calibrate_asan tests/test_calibrate.c src/calibrate.c src/display.c src/client.c src/proto.c $(LDLIBS) && \
 	    ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 $(BUILD)/test_calibrate_asan
+	$(CC) $(CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
+	    -o $(BUILD)/test_record_asan tests/test_record.c src/record.c src/calibrate.c src/display.c src/client.c src/proto.c $(LDLIBS) && \
+	    ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 $(BUILD)/test_record_asan
 
 # Plan 2's OBS plugin is C++ and includes these headers directly. The objects
 # are built by the C compiler and linked by the C++ one on purpose: a header

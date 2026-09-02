@@ -1009,9 +1009,20 @@ int gz_apply_blob(struct gz_client *c, const char *sock_path,
 /* ---------------- shared CLI plumbing ---------------- */
 
 /* Connect, gate the status, and check the device holds the geometry the config
- * asks for. Returns GZ_GATE_*; only GZ_GATE_OK may calibrate or measure. */
-static int connect_and_gate(struct gz_client *c, const char *sock, const char *cfg,
-                            int require_geometry, struct gz_rect *out_want) {
+ * asks for. Returns GZ_GATE_*; only GZ_GATE_OK may calibrate or measure.
+ *
+ * Exported rather than static because record.c needs exactly this: the trace
+ * recorder must refuse a correction fitted against different geometry the same
+ * way accuracy does, and it can only do that against the rect this proves the
+ * device is holding. */
+int gz_connect_and_gate(struct gz_client *c, const char *sock, const char *cfg,
+                        int require_geometry, struct gz_rect *out_want) {
+    /* Before anything that can return early. Every caller closes the client on
+     * a non-OK gate, and the two config failures below return before
+     * gz_client_connect has touched it, so without this that close reads an
+     * uninitialised fd off the caller's stack and may close an unrelated one. */
+    gz_client_init(c);
+
     char cfgbuf[512];
     if (cfg == NULL) {
         if (gz_config_path(cfgbuf, sizeof cfgbuf) != 0) {
@@ -1077,7 +1088,7 @@ int gz_cmd_calibrate(const char *sock, const char *cfg,
     say("screen: %s %dx%d at +%d+%d\n", scr->name, scr->w, scr->h, scr->x, scr->y);
 
     struct gz_client c;
-    int g = connect_and_gate(&c, sock, cfg, 1, NULL);
+    int g = gz_connect_and_gate(&c, sock, cfg, 1, NULL);
     if (g != GZ_GATE_OK) {
         gz_client_close(&c);
         log_close();
@@ -1387,7 +1398,7 @@ int gz_cmd_accuracy(const char *sock, const char *cfg, const char *label,
 
     struct gz_client c;
     struct gz_rect panel;
-    int g = connect_and_gate(&c, sock, cfg, 1, &panel);
+    int g = gz_connect_and_gate(&c, sock, cfg, 1, &panel);
     if (g != GZ_GATE_OK) {
         gz_client_close(&c);
         log_close();
@@ -1532,7 +1543,7 @@ int gz_cmd_fit(const char *sock, const char *cfg,
 
     struct gz_client c;
     struct gz_rect panel;
-    int g = connect_and_gate(&c, sock, cfg, 1, &panel);
+    int g = gz_connect_and_gate(&c, sock, cfg, 1, &panel);
     if (g != GZ_GATE_OK) {
         gz_client_close(&c);
         log_close();
@@ -1667,7 +1678,7 @@ int gz_cmd_probe(const char *sock, const char *cfg,
     struct gz_client c;
     /* The geometry is printed but not required: this command runs BEFORE the
      * display area is settled, because it is what settles z_mm. */
-    int g = connect_and_gate(&c, sock, cfg, 0, NULL);
+    int g = gz_connect_and_gate(&c, sock, cfg, 0, NULL);
     if (g != GZ_GATE_OK) {
         gz_client_close(&c);
         log_close();

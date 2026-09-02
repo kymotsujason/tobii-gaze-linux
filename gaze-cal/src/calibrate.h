@@ -303,6 +303,15 @@ int gz_correction_fit(const struct gz_fit_input *in, int n, struct gz_rect area,
  * GZ_CAL_PTS is row-major from the top left. */
 int gz_missing_cause(const int *paired, const double *eye_z, int n, double *out_med_z);
 
+/* Connect, gate the daemon's status, and prove the device holds the geometry
+ * the config names, writing that rect to `out_want` when it does. Returns a
+ * GZ_GATE_* code; only GZ_GATE_OK may measure anything. `cfg` may be NULL for
+ * the default path. `require_geometry` clear waives a MISMATCH, which only the
+ * probe may do, since the probe's job is to settle a field of the geometry and
+ * it therefore runs before that geometry is right. */
+int gz_connect_and_gate(struct gz_client *c, const char *sock, const char *cfg,
+                        int require_geometry, struct gz_rect *out_want);
+
 int gz_correction_path(char *buf, size_t cap);
 
 /* Writes through a temporary file and renames, like the blob. `rep` may be
