@@ -1705,3 +1705,42 @@ STATE OF THE ACCURACY WORK AT THIS POINT, for anyone resuming:
   form S after the same move    52 px    the form to ship
   correction.conf currently holds FORM H parameters gx 1.17213 gy 1.18952 bx -0.014093
   by -0.062792, fitted from fit#9, and is superseded once form S lands.
+
+## 2026-09-01, session 4: form S reviewed, Task 15 code complete
+
+Form S (f3f61e2) got its scoped Opus review: 0 Critical, 3 Important, 6 Minor. The model,
+apply path, fit, file format, three refusals and tests were confirmed correct. Judgement A:
+the form H correction.conf on disk is REFUSED, version lock first then form lock, measured
+against the real file plus fifteen variants (nan, inf, 1e400, gx 0, negative gain, missing
+keys, form 0 and 2, empty). Judgement B: the per-axis outlier rule is dead (fit#9 drops 3,
+lateral#1 drops 2) and so is a tighter isotropy bound (lateral#1 self-fits at 1.04657 while
+the hole sits at 1.044), but a POST-REFIT refusal catches the hole and leaves all seven
+recorded nine-point sweeps unchanged. Only verify-normal#1 reaches the rejection path at all.
+  Controller decision: ADOPT it. A refused fit costs one 30 s sweep, an absorbed 5.7 percent
+  gy error silently poisons the Task 15 trace. It adds a refusal and relaxes nothing.
+  Fix round 1 landed 513da1b: GZ_FIT_ERR_REFIT (-5) plus refit_outlier on gz_fit_report,
+  the pinning test now asserts refusal on the same synthetic geometry, a mutation disabling
+  the guard is killed, score_correction.py mirrors it, fit#9 unchanged to every printed
+  digit (gx 1.16947 gy 1.18752 bx -0.103394 by -0.247857). The two Important text findings
+  (gz_cmd_fit still describing form H's per-user scoping and framing test 5.3 as open) were
+  fixed. Re-review: ALL FIXES ADDRESSED. Controller check at 513da1b: 181/7/0, exit 0.
+  Deferred minors are in the workspace ledger.
+Task 15 was implemented in parallel in an agent worktree (gaze-cal/ is self-contained), then
+cherry-picked as 854f455. gaze-cal record writes the brief's 16 raw columns plus six
+corrected columns via form S (nan where the input eye is invalid), refuses without a usable
+correction unless --raw, copies the fit beside the trace as <path>.correction.conf, records
+300 s by default, and is SIGINT safe. The implementer found and fixed a pre-existing
+gz_connect_and_gate bug where callers closed an uninitialised fd. Review: 0 Critical, 1
+Important (a --raw re-recording left a stale provenance file beside an uncorrected trace,
+reproduced live), 6 Minor. Fix round 1 landed 75f433e, adding the unlink plus six eye-origin
+columns (controller addition: form S is per seat, so head movement during real play is the
+one thing a later analysis can't get without another human session). Re-review: ALL FIXES
+ADDRESSED. Controller check at 75f433e: 201/7/0, exit 0. Twenty record mutations, all killed.
+  Known limit: a recv carrying two gaze frames loses one to the client's single latest slot.
+  It is counted on the "samples missed" line, measured 0 of 164 intervals idle, untested
+  under osu plus OBS load.
+STATE: form S and the recorder are reviewed clean. The human fit is the blocker for
+everything: fit-correction.sh, then gaze-cal record for five minutes of osu, then Task 16.
+The daemon was left running. The agent worktree and its branch were removed after both
+commits were confirmed content-identical to the cherry-picks (only index hashes and hunk
+offsets differed).

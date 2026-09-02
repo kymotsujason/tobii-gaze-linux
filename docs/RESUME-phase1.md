@@ -1,7 +1,7 @@
 # RESUME HERE: Tobii gaze overlay, Phase 1
 
 Read this first, then `docs/wip/phase1-ledger.md` for the full execution record. Last
-updated 2026-07-26 during session 3.
+updated 2026-09-01 during session 4.
 
 ## What this project is
 
@@ -68,11 +68,11 @@ A file survives a lost message.
 | 12. Display area readback gate | complete (`d432926..e6dc84a`) |
 | 14. systemd user unit | complete (`ebf87fb..91520cb`), done out of order |
 | 13. Calibration + persistence experiment | ran on hardware; it REVEALED THE DEFECT below rather than completing. Spec section 13 item 2 is not answerable as posed |
-| **13b. Host-side gaze correction** | NEW, not in the plan. Form S shipped (`f3f61e2`); **needs a scoped re-review and one human fit** |
-| **15. Trace recorder** | blocked behind 13b, needs five minutes of real osu |
-| 16. Refit filter constants | blocked behind 15, which produces its input |
+| **13b. Host-side gaze correction** | NEW, not in the plan. Form S complete (`f3f61e2..513da1b`, reviewed clean after one fix round). **Needs one human fit** |
+| **15. Trace recorder** | code complete (`854f455..75f433e`, reviewed clean after one fix round). **Needs the human fit, then five minutes of real osu** |
+| 16. Refit filter constants | blocked behind 15's recording, which produces its input |
 
-Every task carries a review verdict. Ten of the fourteen closed needed a fix round first.
+Every task carries a review verdict. Twelve of the sixteen closed needed a fix round first.
 
 ## The finding that reshaped Phase 1
 
@@ -101,18 +101,35 @@ correction. Measured on hardware:
 
 Spec test 5.3 decided against the head-aware form: **the scale centre is not the eye.**
 
+The form S review (session 4) added one refusal to the fit. After the single refit that
+spec 2.3 allows, a surviving point still past 3x the new median refuses the sweep with
+`GZ_FIT_ERR_REFIT`. It closes the case where a second outlier on the other axis was
+absorbed and dragged `gy` by 5.7 percent while passing the isotropy guard. Re-scored over
+the seven recorded nine-point sweeps it fires on none of them, and only `verify-normal#1`
+reaches the rejection path at all, so that evidence rests on one sweep. A refused fit costs
+one 30 second sweep, an absorbed gain error would poison the Task 15 trace, so the guard
+stays. `tools/score_correction.py` mirrors it.
+
 ## What the human still has to do
 
 1. **Re-fit, because nothing works until you do.** The `correction.conf` on disk holds
    form H parameters whose offsets are eye-relative, so form S REFUSES it: reading it as
-   form S would be wrong by about 90 px and would look like a working calibration. Run
-   `gaze-cal fit` where you actually sit, then `gaze-cal accuracy --label verify-formS`
-   without moving, expecting 35 to 50 px and WITHIN ONE DEGREE. Re-fit whenever the seat
-   changes for good.
-2. **Task 15**, five minutes of real osu, which is now unblocked once form S is verified.
-   It must be recorded through a CORRECTED stream: a trace carrying the 18 percent gain
-   would poison every constant Task 16 fits, and would look like sensor noise rather than a
-   systematic scale.
+   form S would be wrong by about 90 px and would look like a working calibration. The
+   refusal was measured against the real file in the session 4 review. Run
+   `./scripts/fit-correction.sh` where you actually sit, lights on, about 600 mm back. It
+   runs the fit sweep and then the verify sweep without moving, expecting 35 to 50 px and
+   WITHIN ONE DEGREE, and the third sweep is optional. Re-fit whenever the seat changes
+   for good.
+2. **Task 15's recording**, five minutes of real osu, unblocked once form S is verified.
+   `gaze-cal record traces/osu-YYYYMMDD.csv` records 300 seconds by default, refuses to
+   run without a usable form S fit (pass `--raw` only for a smoke test, never for Task 16),
+   and writes a copy of the fit beside the trace as `<path>.correction.conf`. The CSV has
+   28 columns: the brief's 16 raw fields, six corrected fields (`nan` where the input eye
+   is invalid), and the six calibrated eye origins in tracker mm. Read the "samples
+   missed" line at the end. A recv carrying two gaze frames loses one to the client's
+   single `latest` slot, which measured 0 missed on an idle desktop but is untested under
+   osu plus OBS. Then run the brief's Step 3 python: median dt near 30.3 ms, invalid
+   fraction in the low single digits.
 
 ## Operating requirements found the hard way
 
