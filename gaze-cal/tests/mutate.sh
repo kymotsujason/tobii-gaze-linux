@@ -34,10 +34,11 @@ fresh_copy() {
     rm -rf "$WORK/m"; mkdir -p "$WORK/m/src" "$WORK/m/tests"
     cp "$SRC/src/proto.c" "$SRC/src/proto.h" "$SRC/src/client.c" "$SRC/src/client.h" \
        "$SRC/src/display.c" "$SRC/src/display.h" "$SRC/src/calibrate.c" "$SRC/src/calibrate.h" \
-       "$SRC/src/record.c" "$SRC/src/record.h" \
+       "$SRC/src/record.c" "$SRC/src/record.h" "$SRC/src/view.c" "$SRC/src/view.h" \
        "$WORK/m/src/"
     cp "$SRC/tests/test_proto.c" "$SRC/tests/test_client.c" "$SRC/tests/test_display.c" \
-       "$SRC/tests/test_calibrate.c" "$SRC/tests/test_record.c" "$WORK/m/tests/"
+       "$SRC/tests/test_calibrate.c" "$SRC/tests/test_record.c" "$SRC/tests/test_view.c" \
+       "$WORK/m/tests/"
 }
 
 apply_edit() {
@@ -1077,6 +1078,85 @@ run_mutation "the provenance name truncated instead of refused" record.c \
 run_mutation "the per-eye path divides by an unchecked gain" record.c \
     "    return c->gx != 0.0 && c->gy != 0.0;" \
     "    return 1;"
+
+echo
+echo "== setup view mutations =="
+
+# The pure half of the view. The frame loop is not mutated: it owns the window
+# and the socket and no test reaches it, so a mutation there would survive and
+# say nothing. What is mutated is everything a human reads off the screen and
+# everything that decides when a sweep runs, because a wrong dwell or a client
+# left open costs a session rather than a frame.
+TEST_MAIN="tests/test_view.c"
+TEST_SRCS="src/view.c src/calibrate.c src/display.c src/client.c src/proto.c"
+
+run_mutation "the box is not a third of the screen" view.c \
+    "    out->box_h = scr->h / 3;" "    out->box_h = scr->h / 4;"
+
+run_mutation "eye dots not clamped to the box" view.c \
+    "    if (box_x > 1.0) box_x = 1.0;" "    if (0) box_x = 1.0;"
+
+run_mutation "bar drawn upside down" view.c \
+    "    return l->bar_y + l->bar_h - (int)lround(box_z * l->bar_h);" \
+    "    return l->bar_y + (int)lround(box_z * l->bar_h);"
+
+run_mutation "z fit ignores live samples" view.c \
+    "    f->sx += box_z; f->sy += z_mm; f->sxx += box_z * box_z; f->sxy += box_z * z_mm;" \
+    "    if (f->n >= 2) return;
+    f->sx += box_z; f->sy += z_mm; f->sxx += box_z * box_z; f->sxy += box_z * z_mm;"
+
+run_mutation "dwell fires every frame after the threshold" view.c \
+    "    if (!d->fired && now_ns - d->since_ns >= GZ_DWELL_NS) {" \
+    "    if (now_ns - d->since_ns >= GZ_DWELL_NS) {"
+
+run_mutation "dwell fires early" view.c \
+    "    if (!d->fired && now_ns - d->since_ns >= GZ_DWELL_NS) {" \
+    "    if (!d->fired && now_ns - d->since_ns >= GZ_DWELL_NS / 2) {"
+
+run_mutation "dwell does not reset on leave" view.c \
+    "    if (!inside || gap) {" "    if (gap) {"
+
+run_mutation "dwell does not reset on a gap" view.c \
+    "    if (!inside || gap) {" "    if (!inside) {"
+
+run_mutation "a refused fit leads to verify" view.c \
+    "            if (v->verdict.refused) { v->state = GZ_VIEW_FIT_SWEEP; return GZ_ACT_RUN_FIT; }" \
+    "            if (0) { v->state = GZ_VIEW_FIT_SWEEP; return GZ_ACT_RUN_FIT; }"
+
+run_mutation "a trigger during a sweep starts another" view.c \
+    "    case GZ_VIEW_FIT_SWEEP:
+        if (ev == GZ_EV_SWEEP_DONE && result != NULL) {" \
+    "    case GZ_VIEW_FIT_SWEEP:
+        if (ev == GZ_EV_TRIGGER) return GZ_ACT_RUN_FIT;
+        if (ev == GZ_EV_SWEEP_DONE && result != NULL) {"
+
+run_mutation "escape does not close" view.c \
+    "    if (ev == GZ_EV_ESCAPE) { v->state = GZ_VIEW_CLOSED; return GZ_ACT_CLOSE; }" \
+    "    if (ev == GZ_EV_ESCAPE) { return GZ_ACT_CLOSE; }"
+
+run_mutation "the client is not closed before a sweep" view.c \
+    "    io->close_client(io->ctx);
+    if (act == GZ_ACT_RUN_FIT) {" \
+    "    if (act == GZ_ACT_RUN_FIT) {"
+
+run_mutation "the client is not reconnected after a sweep" view.c \
+    "    io->reconnect_client(io->ctx);
+    return gz_view_step(v, GZ_EV_SWEEP_DONE, &result);" \
+    "    return gz_view_step(v, GZ_EV_SWEEP_DONE, &result);"
+
+run_mutation "the correction is reloaded after a refused fit" view.c \
+    "        if (!result.refused && result.rc == 0) io->reload_correction(io->ctx);" \
+    "        io->reload_correction(io->ctx);"
+
+run_mutation "the verdict text drops the one degree call" view.c \
+    "                     v->within_one_degree ? \"WITHIN ONE DEGREE\" : \"OUTSIDE ONE DEGREE\",
+                     v->gx, v->gy, v->next);" \
+    "                     \"\",
+                     v->gx, v->gy, v->next);"
+
+run_mutation "fit_utc read from the wrong key" view.c \
+    "        if (strncmp(line, \"fit_utc=\", 8) != 0) continue;" \
+    "        if (strncmp(line, \"fit_pts=\", 8) != 0) continue;"
 
 echo
 echo "killed=$killed  documented_survivors=$documented  unexpected_survivors=$unexpected"
